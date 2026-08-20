@@ -10,6 +10,7 @@ from ddareungi_rearrangement.simulation import (
     SimulationConfig,
     StaticThresholdPolicy,
     build_replay_scenario,
+    run_daily_policy_comparison,
     run_spatial_sensitivity,
     simulate_replay,
     snapshot_actionable_coordinates,
@@ -256,3 +257,61 @@ def test_spatial_sensitivity_runs_full_grid_with_shared_requests_and_constraints
     assert frame["relocation_bikes_in_transit_at_end"].unique().to_list() == [0]
     assert (frame["max_relocation_actions_in_epoch"] <= frame["max_actions_per_decision"]).all()
     assert (frame["relocation_distance_km"] > 0).all()
+
+
+def test_daily_policy_comparison_resets_inventory_and_preserves_daily_contract() -> None:
+    first = datetime(2025, 11, 1)
+    second = datetime(2025, 11, 2)
+    end = datetime(2025, 11, 3)
+    trips = pl.DataFrame(
+        {
+            "rent_at": [
+                datetime(2025, 11, 1, 0, 10),
+                datetime(2025, 11, 2, 0, 10),
+            ],
+            "return_at": [
+                datetime(2025, 11, 1, 0, 30),
+                datetime(2025, 11, 2, 0, 30),
+            ],
+            "rent_station_id": ["A", "A"],
+            "return_station_id": ["OUT", "OUT"],
+        }
+    )
+    station_hour = pl.concat(
+        [
+            _station_hour(first, bikes_a=0, bikes_b=10),
+            _station_hour(second, bikes_a=0, bikes_b=10),
+        ]
+    )
+
+    frame, excluded = run_daily_policy_comparison(
+        trips,
+        station_hour,
+        {"A": (37.5, 127.0), "B": (37.5, 127.001)},
+        analysis_start=first,
+        analysis_end=end,
+    )
+
+    assert frame.height == 6
+    assert excluded == ()
+    assert frame["date"].n_unique() == 2
+    daily_request_counts = frame.group_by("date").agg(pl.col("observed_requests").n_unique())
+    assert daily_request_counts["observed_requests"].to_list() == [1, 1]
+    assert (frame["conservation_residual"] == 0).all()
+    assert (
+        frame.filter(pl.col("policy_name") == "greedy_default")["max_relocation_actions_in_epoch"]
+        <= 2
+    ).all()
+    assert (
+        frame.filter(pl.col("policy_name") == "greedy_service")["max_relocation_actions_in_epoch"]
+        <= 3
+    ).all()
+    assert (
+        frame.filter(pl.col("policy_name") != "no_relocation")["failures_avoided_vs_p0"] == 1
+    ).all()
+    assert (
+        frame.filter(pl.col("policy_name") == "greedy_service")[
+            "additional_failures_avoided_vs_default"
+        ]
+        == 0
+    ).all()

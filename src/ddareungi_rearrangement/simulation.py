@@ -366,6 +366,23 @@ class SensitivityExperiment:
     output_files: dict[str, str]
 
 
+@dataclass(frozen=True)
+class TemporalRobustnessExperiment:
+    generated_at_utc: str
+    method: str
+    analysis_window: str
+    stations: int
+    coordinate_file: str
+    valid_days: int
+    excluded_days: tuple[dict[str, Any], ...]
+    policies: dict[str, dict[str, Any]]
+    daily_runs: tuple[dict[str, Any], ...]
+    group_summaries: tuple[dict[str, Any], ...]
+    effect_consistency: dict[str, dict[str, Any]]
+    limitations: tuple[str, ...]
+    output_files: dict[str, str]
+
+
 DEFAULT_CANDIDATES = (
     ThresholdCandidate("conservative", 1, 4, 8),
     ThresholdCandidate("balanced", 2, 5, 8),
@@ -1479,6 +1496,468 @@ def _calculate_action_marginals(frame: pl.DataFrame) -> tuple[dict[str, Any], ..
     return tuple(records)
 
 
+def run_daily_policy_comparison(
+    trips: pl.DataFrame,
+    station_hour: pl.DataFrame,
+    coordinates: dict[str, tuple[float, float]],
+    *,
+    analysis_start: datetime,
+    analysis_end: datetime,
+) -> tuple[pl.DataFrame, tuple[dict[str, Any], ...]]:
+    if analysis_end <= analysis_start:
+        raise ValueError("일별 분석 종료 시각은 시작 시각보다 늦어야 합니다")
+    if any(
+        value != 0
+        for value in (
+            analysis_start.hour,
+            analysis_start.minute,
+            analysis_start.second,
+            analysis_end.hour,
+            analysis_end.minute,
+            analysis_end.second,
+        )
+    ):
+        raise ValueError("일별 분석 시작과 종료는 자정이어야 합니다")
+    station_ids = set(coordinates)
+    policies: tuple[tuple[int, str, RelocationPolicy], ...] = (
+        (0, "P0 재배치 없음", NoRelocationPolicy()),
+        (
+            1,
+            "P2 기존 2회·15km/h",
+            GreedyNearestPolicy(
+                coordinates=coordinates,
+                max_actions_per_decision=2,
+                vehicle_capacity=20,
+                average_speed_kmh=15.0,
+                name="greedy_default",
+            ),
+        ),
+        (
+            2,
+            "P2 서비스 3회·20km/h",
+            GreedyNearestPolicy(
+                coordinates=coordinates,
+                max_actions_per_decision=3,
+                vehicle_capacity=10,
+                average_speed_kmh=20.0,
+                name="greedy_service",
+            ),
+        ),
+    )
+    records: list[dict[str, Any]] = []
+    excluded: list[dict[str, Any]] = []
+    day_start = analysis_start
+    while day_start < analysis_end:
+        day_end = day_start + timedelta(days=1)
+        initial_rows = station_hour.filter(
+            (pl.col("timestamp") == day_start)
+            & pl.col("actionable")
+            & pl.col("inventory_observed")
+            & pl.col("station_id").is_in(station_ids)
+        )
+        available_ids = set(initial_rows["station_id"].unique().to_list())
+        if available_ids != station_ids:
+            missing_ids = tuple(sorted(station_ids - available_ids))
+            excluded.append(
+                {
+                    "date": day_start.date().isoformat(),
+                    "reason": "incomplete_midnight_inventory",
+                    "available_stations": len(available_ids),
+                    "missing_station_ids": missing_ids,
+                }
+            )
+            day_start = day_end
+            continue
+        scenario = build_replay_scenario(
+            trips,
+            station_hour,
+            SimulationConfig(
+                start=day_start,
+                end=day_end,
+                decision_interval_minutes=60,
+                max_bikes_per_decision=40,
+            ),
+            eligible_station_ids=station_ids,
+        )
+        day_type = "주말" if day_start.weekday() >= 5 else "주중"
+        for policy_order, label, policy in policies:
+            metrics = simulate_replay(scenario, policy).metrics
+            records.append(
+                {
+                    "date": day_start.date().isoformat(),
+                    "weekday_number": day_start.weekday(),
+                    "day_type": day_type,
+                    "policy_order": policy_order,
+                    "policy_label": label,
+                    **asdict(metrics),
+                }
+            )
+        day_start = day_end
+    if not records:
+        raise SimulationError("유효한 일별 시뮬레이션 날짜가 없습니다")
+
+    baseline_by_date = {
+        str(record["date"]): record
+        for record in records
+        if record["policy_name"] == "no_relocation"
+    }
+    default_by_date = {
+        str(record["date"]): record
+        for record in records
+        if record["policy_name"] == "greedy_default"
+    }
+    for record in records:
+        baseline = baseline_by_date[str(record["date"])]
+        failures_avoided = baseline["failed_rentals"] - record["failed_rentals"]
+        record["failures_avoided_vs_p0"] = failures_avoided
+        record["service_rate_percentage_point_vs_p0"] = round(
+            (record["service_rate"] - baseline["service_rate"]) * 100,
+            3,
+        )
+        record["empty_hours_reduced_vs_p0"] = round(
+            baseline["empty_station_hours"] - record["empty_station_hours"],
+            3,
+        )
+        record["additional_failures_avoided_vs_default"] = (
+            default_by_date[str(record["date"])]["failed_rentals"] - record["failed_rentals"]
+            if record["policy_name"] == "greedy_service"
+            else 0
+        )
+    frame = pl.DataFrame(records).sort("date", "policy_order")
+    request_counts = frame.group_by("date").agg(
+        pl.col("observed_requests").n_unique().alias("unique_request_counts")
+    )
+    if request_counts["unique_request_counts"].max() != 1:
+        raise SimulationError("동일 날짜의 정책별 관측 요청 수가 다릅니다")
+    return frame, tuple(excluded)
+
+
+def build_temporal_robustness(
+    *,
+    trips_path: Path,
+    station_hour_path: Path,
+    coordinate_path: Path,
+    analysis_start: datetime,
+    analysis_end: datetime,
+    daily_csv_path: Path,
+    figure_path: Path,
+    json_path: Path,
+    markdown_path: Path,
+) -> TemporalRobustnessExperiment:
+    try:
+        trips = pl.read_parquet(trips_path)
+        station_hour = pl.read_parquet(station_hour_path)
+        coordinate_frame = pl.read_csv(
+            coordinate_path,
+            schema_overrides={"station_id": pl.String},
+        )
+    except (OSError, pl.exceptions.PolarsError) as exc:
+        raise SimulationError(f"시간적 강건성 입력을 읽지 못했습니다: {exc}") from exc
+    required_coordinate_columns = {"station_id", "latitude", "longitude"}
+    missing_columns = required_coordinate_columns - set(coordinate_frame.columns)
+    if missing_columns:
+        raise SimulationError(f"좌표 필수 열 누락: {sorted(missing_columns)}")
+    if coordinate_frame["station_id"].n_unique() != coordinate_frame.height:
+        raise SimulationError("좌표 대여소 ID가 중복됐습니다")
+    coordinates = {
+        str(row["station_id"]): (float(row["latitude"]), float(row["longitude"]))
+        for row in coordinate_frame.iter_rows(named=True)
+    }
+    daily_frame, excluded_days = run_daily_policy_comparison(
+        trips,
+        station_hour,
+        coordinates,
+        analysis_start=analysis_start,
+        analysis_end=analysis_end,
+    )
+    group_summaries = _summarize_temporal_groups(daily_frame)
+    effect_consistency = _summarize_effect_consistency(daily_frame)
+    daily_csv_path.parent.mkdir(parents=True, exist_ok=True)
+    daily_frame.write_csv(daily_csv_path)
+    _plot_temporal_robustness(daily_frame, group_summaries, figure_path)
+    output_files = {
+        "daily_comparison": str(daily_csv_path),
+        "robustness_figure": str(figure_path),
+        "json_report": str(json_path),
+        "markdown_report": str(markdown_path),
+    }
+    experiment = TemporalRobustnessExperiment(
+        generated_at_utc=datetime.now(UTC).isoformat(),
+        method="independent_daily_observed_trip_replay",
+        analysis_window=f"{analysis_start.isoformat()} <= t < {analysis_end.isoformat()}",
+        stations=len(coordinates),
+        coordinate_file=str(coordinate_path),
+        valid_days=daily_frame["date"].n_unique(),
+        excluded_days=excluded_days,
+        policies={
+            "no_relocation": {"label": "P0 재배치 없음"},
+            "greedy_default": {
+                "label": "P2 기존 2회·15km/h",
+                "max_direct_trips_per_hour": 2,
+                "average_speed_kmh": 15.0,
+                "vehicle_capacity": 20,
+            },
+            "greedy_service": {
+                "label": "P2 서비스 3회·20km/h",
+                "max_direct_trips_per_hour": 3,
+                "average_speed_kmh": 20.0,
+                "vehicle_capacity": 10,
+            },
+        },
+        daily_runs=tuple(daily_frame.to_dicts()),
+        group_summaries=group_summaries,
+        effect_consistency=effect_consistency,
+        limitations=(
+            "각 날짜를 00시 관측 재고에서 독립적으로 시작해 전날 정책 효과를 이어받지 않는다.",
+            "월 집계 P0에는 자정 이전의 실제 운영 결과가 시작 재고에 포함되며, "
+            "30일 연속 무재배치가 아니다.",
+            "따라서 날짜별 P0 월 성공률은 기존 5일 연속 P0 성공률과 직접 비교할 수 없다.",
+            "11월 3~21일은 임계값 선택에 사용돼 월 전체 결과는 순수 홀드아웃 추정치가 아니다.",
+            "공개 대여이력에 기록된 성공 요청만 재생하고 미관측 잠재 수요는 제외한다.",
+            "차량의 첫 접근 이동과 차량 간 연속 경로, 실제 교통·신호를 반영하지 않는다.",
+            "주중·주말 차이는 날씨·행사·공휴일 등 교란요인을 통제한 인과효과가 아니다.",
+        ),
+        output_files=output_files,
+    )
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    markdown_path.parent.mkdir(parents=True, exist_ok=True)
+    json_path.write_text(
+        json.dumps(asdict(experiment), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    markdown_path.write_text(_render_temporal_markdown(experiment), encoding="utf-8")
+    return experiment
+
+
+def _summarize_temporal_groups(frame: pl.DataFrame) -> tuple[dict[str, Any], ...]:
+    records: list[dict[str, Any]] = []
+    policy_rows = (
+        frame.select("policy_order", "policy_name", "policy_label").unique().sort("policy_order")
+    )
+    for policy in policy_rows.iter_rows(named=True):
+        for day_type in ("주중", "주말"):
+            subset = frame.filter(
+                (pl.col("policy_name") == policy["policy_name"]) & (pl.col("day_type") == day_type)
+            )
+            if subset.is_empty():
+                continue
+            total_requests = int(subset["observed_requests"].sum())
+            total_successes = int(subset["successful_rentals"].sum())
+            improvements = subset["failures_avoided_vs_p0"]
+            records.append(
+                {
+                    "policy_order": policy["policy_order"],
+                    "policy_name": policy["policy_name"],
+                    "policy_label": policy["policy_label"],
+                    "day_type": day_type,
+                    "days": subset.height,
+                    "observed_requests": total_requests,
+                    "successful_rentals": total_successes,
+                    "failed_rentals": int(subset["failed_rentals"].sum()),
+                    "weighted_service_rate": _rate(total_successes, total_requests),
+                    "empty_station_hours": round(subset["empty_station_hours"].sum(), 3),
+                    "bikes_moved": int(subset["bikes_moved"].sum()),
+                    "relocation_distance_km": round(subset["relocation_distance_km"].sum(), 3),
+                    "relocation_vehicle_minutes": round(
+                        subset["relocation_vehicle_minutes"].sum(), 3
+                    ),
+                    "failures_avoided_vs_p0": int(improvements.sum()),
+                    "median_daily_failures_avoided": float(improvements.median()),
+                    "days_better_than_p0": int((improvements > 0).sum()),
+                    "days_tied_with_p0": int((improvements == 0).sum()),
+                    "days_worse_than_p0": int((improvements < 0).sum()),
+                }
+            )
+    return tuple(records)
+
+
+def _summarize_effect_consistency(frame: pl.DataFrame) -> dict[str, dict[str, Any]]:
+    summaries: dict[str, dict[str, Any]] = {}
+    for policy_name in ("greedy_default", "greedy_service"):
+        subset = frame.filter(pl.col("policy_name") == policy_name)
+        improvements = subset["failures_avoided_vs_p0"]
+        worst = subset.sort("failures_avoided_vs_p0", "date").row(0, named=True)
+        best = subset.sort("failures_avoided_vs_p0", "date", descending=[True, False]).row(
+            0, named=True
+        )
+        summaries[policy_name] = {
+            "days": subset.height,
+            "days_better_than_p0": int((improvements > 0).sum()),
+            "days_tied_with_p0": int((improvements == 0).sum()),
+            "days_worse_than_p0": int((improvements < 0).sum()),
+            "minimum_daily_failures_avoided": int(improvements.min()),
+            "median_daily_failures_avoided": float(improvements.median()),
+            "maximum_daily_failures_avoided": int(improvements.max()),
+            "weakest_date": worst["date"],
+            "strongest_date": best["date"],
+            "reversal_dates": tuple(
+                subset.filter(pl.col("failures_avoided_vs_p0") < 0)["date"].to_list()
+            ),
+            "tie_dates": tuple(
+                subset.filter(pl.col("failures_avoided_vs_p0") == 0)["date"].to_list()
+            ),
+        }
+    service = frame.filter(pl.col("policy_name") == "greedy_service")
+    incremental = service["additional_failures_avoided_vs_default"]
+    weakest = service.sort("additional_failures_avoided_vs_default", "date").row(0, named=True)
+    strongest = service.sort(
+        "additional_failures_avoided_vs_default", "date", descending=[True, False]
+    ).row(0, named=True)
+    summaries["greedy_service_vs_default"] = {
+        "days": service.height,
+        "days_better_than_default": int((incremental > 0).sum()),
+        "days_tied_with_default": int((incremental == 0).sum()),
+        "days_worse_than_default": int((incremental < 0).sum()),
+        "minimum_daily_additional_failures_avoided": int(incremental.min()),
+        "median_daily_additional_failures_avoided": float(incremental.median()),
+        "maximum_daily_additional_failures_avoided": int(incremental.max()),
+        "weakest_date": weakest["date"],
+        "strongest_date": strongest["date"],
+        "worse_dates": tuple(
+            service.filter(pl.col("additional_failures_avoided_vs_default") < 0)["date"].to_list()
+        ),
+        "tie_dates": tuple(
+            service.filter(pl.col("additional_failures_avoided_vs_default") == 0)["date"].to_list()
+        ),
+    }
+    return summaries
+
+
+def _render_temporal_markdown(experiment: TemporalRobustnessExperiment) -> str:
+    summary_rows = "\n".join(
+        "| {label} | {day_type} | {days} | {requests:,} | {service:.2%} | "
+        "{failed:,} | {empty:,.1f} | {avoided:+,} | {better}/{tie}/{worse} |".format(
+            label=row["policy_label"],
+            day_type=row["day_type"],
+            days=row["days"],
+            requests=row["observed_requests"],
+            service=row["weighted_service_rate"],
+            failed=row["failed_rentals"],
+            empty=row["empty_station_hours"],
+            avoided=row["failures_avoided_vs_p0"],
+            better=row["days_better_than_p0"],
+            tie=row["days_tied_with_p0"],
+            worse=row["days_worse_than_p0"],
+        )
+        for row in experiment.group_summaries
+    )
+    daily_by_date: dict[str, dict[str, dict[str, Any]]] = {}
+    for row in experiment.daily_runs:
+        daily_by_date.setdefault(row["date"], {})[row["policy_name"]] = row
+    daily_rows = "\n".join(
+        "| {date} | {day_type} | {requests:,} | {p0_failed:,} | {default_avoided:+,} | "
+        "{service_avoided:+,} | {service_extra:+,} | {default_rate:.2%} | "
+        "{service_rate:.2%} |".format(
+            date=date,
+            day_type=policies["no_relocation"]["day_type"],
+            requests=policies["no_relocation"]["observed_requests"],
+            p0_failed=policies["no_relocation"]["failed_rentals"],
+            default_avoided=policies["greedy_default"]["failures_avoided_vs_p0"],
+            service_avoided=policies["greedy_service"]["failures_avoided_vs_p0"],
+            service_extra=policies["greedy_service"]["additional_failures_avoided_vs_default"],
+            default_rate=policies["greedy_default"]["service_rate"],
+            service_rate=policies["greedy_service"]["service_rate"],
+        )
+        for date, policies in sorted(daily_by_date.items())
+    )
+
+    def total_for(policy_name: str) -> dict[str, Any]:
+        rows = [row for row in experiment.group_summaries if row["policy_name"] == policy_name]
+        requests = sum(row["observed_requests"] for row in rows)
+        successes = sum(row["successful_rentals"] for row in rows)
+        return {
+            "requests": requests,
+            "failed": sum(row["failed_rentals"] for row in rows),
+            "service_rate": _rate(successes, requests),
+            "empty_hours": sum(row["empty_station_hours"] for row in rows),
+            "failures_avoided": sum(row["failures_avoided_vs_p0"] for row in rows),
+        }
+
+    baseline = total_for("no_relocation")
+    default = total_for("greedy_default")
+    service = total_for("greedy_service")
+    default_consistency = experiment.effect_consistency["greedy_default"]
+    service_consistency = experiment.effect_consistency["greedy_service"]
+    incremental_consistency = experiment.effect_consistency["greedy_service_vs_default"]
+    excluded = (
+        "없음"
+        if not experiment.excluded_days
+        else ", ".join(row["date"] for row in experiment.excluded_days)
+    )
+    limitations = "\n".join(f"- {item}" for item in experiment.limitations)
+    return f"""# 강남구 P2 날짜별 시간적 강건성 분석
+
+## 결론
+
+- 유효 일수: {experiment.valid_days}일, 제외일: {excluded}
+- 월 전체 관측 요청: {baseline["requests"]:,}건
+- P0: 성공률 {baseline["service_rate"]:.2%}, 실패 {baseline["failed"]:,}건
+- 기존 P2(2회·15km/h): 성공률 {default["service_rate"]:.2%}, 실패
+  {default["failed"]:,}건, P0 대비 {default["failures_avoided"]:,}건 방지
+- 서비스 P2(3회·20km/h): 성공률 {service["service_rate"]:.2%}, 실패
+  {service["failed"]:,}건, P0 대비 {service["failures_avoided"]:,}건 방지
+- 기존 P2 일별 개선: {default_consistency["days_better_than_p0"]}/{experiment.valid_days}일,
+  역전 {default_consistency["days_worse_than_p0"]}일, 일별 방지 실패
+  {default_consistency["minimum_daily_failures_avoided"]}~
+  {default_consistency["maximum_daily_failures_avoided"]}건
+- 서비스 P2 일별 개선: {service_consistency["days_better_than_p0"]}/{experiment.valid_days}일,
+  역전 {service_consistency["days_worse_than_p0"]}일, 일별 방지 실패
+  {service_consistency["minimum_daily_failures_avoided"]}~
+  {service_consistency["maximum_daily_failures_avoided"]}건
+- 서비스 P2는 기존 P2 대비 {incremental_consistency["days_better_than_default"]}일 개선,
+  {incremental_consistency["days_worse_than_default"]}일 악화했으며 악화일은
+  {", ".join(incremental_consistency["worse_dates"]) or "없음"}
+
+이 결과는 날짜별 효과 방향의 일관성을 보여주지만, 임계값 학습기간을 포함하므로 월 전체를
+새로운 홀드아웃 검증으로 해석하지 않는다.
+
+날짜별 P0는 매일 실제 자정 재고로 리셋된다. 따라서 이 보고서의 P0 성공률과 이전의 5일
+연속 무재배치 P0는 서로 다른 초기화 계약이므로 수치를 직접 비교할 수 없다.
+
+## 실험 계약
+
+- 방법: `{experiment.method}`
+- 분석 구간: `{experiment.analysis_window}`
+- 동일 대상: 좌표와 자정 재고가 있는 {experiment.stations}개 대여소
+- 일별 초기화: 매일 00:00 관측 재고에서 독립 시작
+- P0: 재배치 없음
+- 기존 P2: 시간당 직접 운송 2회, 15km/h, 적재 20대
+- 서비스 P2: 시간당 직접 운송 3회, 20km/h, 적재 10대
+- 공통: 임계값 2/5/8, 거리보정 1.3, 상하차 자전거당 0.75분
+
+## 주중·주말 집계
+
+개선일/동률일/악화일은 같은 날짜 P0의 실패 건수와 비교한 값이다.
+
+| 정책 | 구분 | 일수 | 요청 | 성공률 | 실패 | 빈 시간 | 방지 실패 | 개선/동률/악화일 |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+{summary_rows}
+
+## 일별 결과
+
+| 날짜 | 구분 | 요청 | P0 실패 | 기존 P2 방지 | 서비스 P2 방지 | 서비스 추가 | \
+기존 성공률 | 서비스 성공률 |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+{daily_rows}
+
+## 불변조건
+
+- 각 날짜의 세 정책은 같은 {experiment.stations}개 대여소, 초기 재고, 요청 순서를 쓴다.
+- 성공 + 실패 = 전체 요청이며 재배치 이동 중 자전거를 포함한 보존식 잔차는 0이다.
+- 정책별 직접 운송 수·적재량 한도를 날짜마다 지킨다.
+
+## 해석 제한
+
+{limitations}
+
+## 다음 단계
+
+1. 대여소별 실패 감소가 소수 지역에 집중되는지 공간적 형평성을 비교한다.
+2. 성과가 낮은 날짜와 대여소의 시간대별 실패 원인을 분해한다.
+3. 그 결과를 바탕으로 수요예측 기반 P3의 입력·평가 계약을 설계한다.
+"""
+
+
 def _render_sensitivity_markdown(experiment: SensitivityExperiment) -> str:
     rows = "\n".join(
         "| {actions} | {capacity} | {speed:.0f} | {service:.2%} | {failed:,} | "
@@ -1792,6 +2271,103 @@ P1은 이동을 즉시 완료하는 낙관적 상한이고, P2는 거리와 직�
 2. 차량 수·속도·적재량 민감도 분석으로 결과 범위를 제시한다.
 3. 관측되지 않은 잠재 수요를 낮음·기준·높음 시나리오로 확장한다.
 """
+
+
+def _plot_temporal_robustness(
+    frame: pl.DataFrame,
+    group_summaries: tuple[dict[str, Any], ...],
+    path: Path,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    dates = sorted(frame["date"].unique().to_list())
+    x_values = list(range(len(dates)))
+    tick_positions = list(range(0, len(dates), 4))
+    tick_labels = [dates[index][5:] for index in tick_positions]
+    policy_rows = (
+        frame.select("policy_order", "policy_name", "policy_label").unique().sort("policy_order")
+    )
+    colors = {
+        "no_relocation": "#7f7f7f",
+        "greedy_default": "#1f77b4",
+        "greedy_service": "#ff7f0e",
+    }
+    malgun_path = Path("C:/Windows/Fonts/malgun.ttf")
+    font_family = "DejaVu Sans"
+    if malgun_path.exists():
+        font_manager.fontManager.addfont(str(malgun_path))
+        font_family = font_manager.FontProperties(fname=str(malgun_path)).get_name()
+    with plt.rc_context({"font.family": font_family}):
+        figure, axes = plt.subplots(2, 2, figsize=(15, 10))
+        for policy in policy_rows.iter_rows(named=True):
+            subset = frame.filter(pl.col("policy_name") == policy["policy_name"]).sort("date")
+            axes[0, 0].plot(
+                x_values,
+                subset["failed_rentals"].to_list(),
+                marker="o",
+                markersize=3,
+                linewidth=1.6,
+                color=colors[policy["policy_name"]],
+                label=policy["policy_label"],
+            )
+            axes[1, 1].plot(
+                x_values,
+                subset["empty_station_hours"].to_list(),
+                marker="o",
+                markersize=3,
+                linewidth=1.6,
+                color=colors[policy["policy_name"]],
+                label=policy["policy_label"],
+            )
+        for policy_name in ("greedy_default", "greedy_service"):
+            subset = frame.filter(pl.col("policy_name") == policy_name).sort("date")
+            label = subset["policy_label"][0]
+            axes[0, 1].plot(
+                x_values,
+                subset["failures_avoided_vs_p0"].to_list(),
+                marker="o",
+                markersize=3,
+                linewidth=1.6,
+                color=colors[policy_name],
+                label=label,
+            )
+        for axis in (axes[0, 0], axes[0, 1], axes[1, 1]):
+            axis.set_xticks(tick_positions, tick_labels, rotation=35)
+            axis.grid(alpha=0.2)
+            axis.legend()
+        axes[0, 0].set_title("날짜별 대여 실패")
+        axes[0, 0].set_ylabel("실패(건)")
+        axes[0, 1].axhline(0, color="#333333", linewidth=1)
+        axes[0, 1].set_title("P0 대비 날짜별 방지 실패")
+        axes[0, 1].set_ylabel("방지 실패(건)")
+        axes[1, 1].set_title("날짜별 빈 대여소 누적 시간")
+        axes[1, 1].set_ylabel("대여소·시간")
+
+        summary_map = {(row["policy_name"], row["day_type"]): row for row in group_summaries}
+        day_types = ("주중", "주말")
+        bar_width = 0.24
+        for index, policy in enumerate(policy_rows.iter_rows(named=True)):
+            values = [
+                summary_map[(policy["policy_name"], day_type)]["weighted_service_rate"] * 100
+                for day_type in day_types
+            ]
+            positions = [value + (index - 1) * bar_width for value in range(len(day_types))]
+            axes[1, 0].bar(
+                positions,
+                values,
+                width=bar_width,
+                color=colors[policy["policy_name"]],
+                label=policy["policy_label"],
+            )
+        axes[1, 0].set_xticks(range(len(day_types)), day_types)
+        axes[1, 0].set_ylim(80, 100)
+        axes[1, 0].set_title("주중·주말 가중 성공률")
+        axes[1, 0].set_ylabel("성공률(%)")
+        axes[1, 0].grid(axis="y", alpha=0.2)
+        axes[1, 0].legend()
+        figure.suptitle("강남구 2025-11 P2 날짜별 시간적 강건성")
+        figure.tight_layout()
+        figure.savefig(path, dpi=160)
+        plt.close(figure)
 
 
 def _plot_spatial_sensitivity(frame: pl.DataFrame, path: Path) -> None:

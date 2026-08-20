@@ -28,6 +28,7 @@ from ddareungi_rearrangement.simulation import (
     build_policy_comparison,
     build_spatial_policy_comparison,
     build_spatial_sensitivity,
+    build_temporal_robustness,
     snapshot_actionable_coordinates,
 )
 
@@ -322,6 +323,47 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("reports/gangnam_2025_11_p2_sensitivity.md"),
     )
+    temporal_parser = subparsers.add_parser(
+        "run-temporal-robustness",
+        help="P0와 대표 P2 정책을 날짜별로 재생해 시간적 강건성을 비교합니다.",
+    )
+    temporal_parser.add_argument(
+        "--trips-file",
+        type=Path,
+        default=Path("data/processed/gangnam_2025_11_trips.parquet"),
+    )
+    temporal_parser.add_argument(
+        "--station-hour-file",
+        type=Path,
+        default=Path("data/processed/gangnam_2025_11_station_hour.parquet"),
+    )
+    temporal_parser.add_argument(
+        "--coordinate-file",
+        type=Path,
+        default=Path("data/sample/gangnam_station_coordinates_2026_08_20.csv"),
+    )
+    temporal_parser.add_argument("--analysis-start", default="2025-11-01")
+    temporal_parser.add_argument("--analysis-end", default="2025-12-01")
+    temporal_parser.add_argument(
+        "--daily-output",
+        type=Path,
+        default=Path("reports/data/gangnam_2025_11_daily_robustness.csv"),
+    )
+    temporal_parser.add_argument(
+        "--figure-output",
+        type=Path,
+        default=Path("reports/figures/gangnam_2025_11_daily_robustness.png"),
+    )
+    temporal_parser.add_argument(
+        "--json-output",
+        type=Path,
+        default=Path("reports/gangnam_2025_11_daily_robustness.json"),
+    )
+    temporal_parser.add_argument(
+        "--markdown-output",
+        type=Path,
+        default=Path("reports/gangnam_2025_11_daily_robustness.md"),
+    )
     return parser
 
 
@@ -526,6 +568,48 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(
             "Distance efficiency best: "
             f"{efficient['failures_avoided_per_100km']:,.1f} avoided failures/100km"
+        )
+        print(f"Report: {args.markdown_output}")
+        return 0
+    if args.command == "run-temporal-robustness":
+        try:
+            experiment = build_temporal_robustness(
+                trips_path=args.trips_file,
+                station_hour_path=args.station_hour_file,
+                coordinate_path=args.coordinate_file,
+                analysis_start=datetime.fromisoformat(args.analysis_start),
+                analysis_end=datetime.fromisoformat(args.analysis_end),
+                daily_csv_path=args.daily_output,
+                figure_path=args.figure_output,
+                json_path=args.json_output,
+                markdown_path=args.markdown_output,
+            )
+        except (SimulationError, ValueError, OSError) as exc:
+            print(f"Temporal robustness simulation failed: {exc}")
+            return 1
+
+        default = experiment.effect_consistency["greedy_default"]
+        service = experiment.effect_consistency["greedy_service"]
+        incremental = experiment.effect_consistency["greedy_service_vs_default"]
+        print(f"Valid daily simulations: {experiment.valid_days}")
+        print(f"Excluded days: {len(experiment.excluded_days)}")
+        print(
+            "P2 default better/tied/worse days: "
+            f"{default['days_better_than_p0']}/"
+            f"{default['days_tied_with_p0']}/"
+            f"{default['days_worse_than_p0']}"
+        )
+        print(
+            "P2 service better/tied/worse days: "
+            f"{service['days_better_than_p0']}/"
+            f"{service['days_tied_with_p0']}/"
+            f"{service['days_worse_than_p0']}"
+        )
+        print(
+            "P2 service vs default better/tied/worse days: "
+            f"{incremental['days_better_than_default']}/"
+            f"{incremental['days_tied_with_default']}/"
+            f"{incremental['days_worse_than_default']}"
         )
         print(f"Report: {args.markdown_output}")
         return 0
