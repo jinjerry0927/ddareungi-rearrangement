@@ -11,6 +11,7 @@ from ddareungi_rearrangement.simulation import (
     StaticThresholdPolicy,
     build_replay_scenario,
     run_daily_policy_comparison,
+    run_donor_reserve_holdout,
     run_donor_reserve_training,
     run_request_transition_trace,
     run_spatial_sensitivity,
@@ -442,4 +443,42 @@ def test_donor_reserve_training_marks_dominated_candidate_without_weighted_score
     assert reserve_eight["failed_rentals"] == 0
     assert reserve_eight["harmed_requests_vs_p0"] == 0
     assert reserve_eight["is_pareto"]
+    assert all(run.metrics.conservation_residual == 0 for run in runs)
+
+
+def test_donor_reserve_holdout_compares_only_frozen_policy_and_reconciles_trace() -> None:
+    start = datetime(2025, 11, 24)
+    end = datetime(2025, 11, 24, 1)
+    trips = pl.DataFrame(
+        {
+            "rent_at": [datetime(2025, 11, 24, 0, minute) for minute in range(5, 11)],
+            "return_at": [datetime(2025, 11, 24, 0, minute) for minute in range(30, 36)],
+            "rent_station_id": ["A"] * 6,
+            "return_station_id": ["OUT"] * 6,
+        }
+    )
+    scenario = build_replay_scenario(
+        trips,
+        _station_hour(start, bikes_a=10, bikes_b=0),
+        SimulationConfig(start=start, end=end, max_bikes_per_decision=40),
+    )
+
+    frame, runs = run_donor_reserve_holdout(
+        scenario,
+        {"A": (37.5, 127.0), "B": (37.5, 127.001)},
+        selected_reserve=7,
+    )
+
+    rows = {row["policy_role"]: row for row in frame.to_dicts()}
+    assert set(rows) == {"P0", "P2", "P3"}
+    assert all(row["observed_requests"] == 6 for row in rows.values())
+    assert rows["P0"]["failed_rentals"] == 0
+    assert rows["P2"]["donor_reserve_bikes"] == 5
+    assert rows["P2"]["failed_rentals"] == 1
+    assert rows["P2"]["harmed_requests_vs_p0"] == 1
+    assert rows["P3"]["donor_reserve_bikes"] == 7
+    assert rows["P3"]["failed_rentals"] == 0
+    assert rows["P3"]["harmed_requests_vs_p0"] == 0
+    assert rows["P3"]["bikes_moved"] < rows["P2"]["bikes_moved"]
+    assert all(row["transition_reconciliation_residual"] == 0 for row in rows.values())
     assert all(run.metrics.conservation_residual == 0 for run in runs)

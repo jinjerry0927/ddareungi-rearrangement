@@ -25,6 +25,7 @@ from ddareungi_rearrangement.pilot_analysis import (
 from ddareungi_rearrangement.seoul_api import SeoulOpenDataClient, SeoulOpenDataError
 from ddareungi_rearrangement.simulation import (
     SimulationError,
+    build_donor_reserve_holdout,
     build_donor_reserve_training,
     build_harm_trace,
     build_policy_comparison,
@@ -496,6 +497,48 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("reports/gangnam_2025_11_donor_reserve_training.md"),
     )
+    holdout_parser = subparsers.add_parser(
+        "run-donor-reserve-holdout",
+        help="동결한 공급지 보유 하한을 단일 홀드아웃에서 검증합니다.",
+    )
+    holdout_parser.add_argument(
+        "--trips-file",
+        type=Path,
+        default=Path("data/processed/gangnam_2025_11_trips.parquet"),
+    )
+    holdout_parser.add_argument(
+        "--station-hour-file",
+        type=Path,
+        default=Path("data/processed/gangnam_2025_11_station_hour.parquet"),
+    )
+    holdout_parser.add_argument(
+        "--coordinate-file",
+        type=Path,
+        default=Path("data/sample/gangnam_station_coordinates_2026_08_20.csv"),
+    )
+    holdout_parser.add_argument("--evaluation-start", default="2025-11-24")
+    holdout_parser.add_argument("--evaluation-end", default="2025-11-29")
+    holdout_parser.add_argument("--selected-reserve", type=int, default=7)
+    holdout_parser.add_argument(
+        "--comparison-output",
+        type=Path,
+        default=Path("reports/data/gangnam_2025_11_donor_reserve_holdout.csv"),
+    )
+    holdout_parser.add_argument(
+        "--figure-output",
+        type=Path,
+        default=Path("reports/figures/gangnam_2025_11_donor_reserve_holdout.png"),
+    )
+    holdout_parser.add_argument(
+        "--json-output",
+        type=Path,
+        default=Path("reports/gangnam_2025_11_donor_reserve_holdout.json"),
+    )
+    holdout_parser.add_argument(
+        "--markdown-output",
+        type=Path,
+        default=Path("reports/gangnam_2025_11_donor_reserve_holdout.md"),
+    )
     return parser
 
 
@@ -832,6 +875,35 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         print(f"Pareto donor reserves: {list(experiment.pareto_reserves)}")
         print(f"Selection status: {experiment.selection_status}")
+        print(f"Report: {args.markdown_output}")
+        return 0
+    if args.command == "run-donor-reserve-holdout":
+        try:
+            experiment = build_donor_reserve_holdout(
+                trips_path=args.trips_file,
+                station_hour_path=args.station_hour_file,
+                coordinate_path=args.coordinate_file,
+                evaluation_start=datetime.fromisoformat(args.evaluation_start),
+                evaluation_end=datetime.fromisoformat(args.evaluation_end),
+                selected_reserve=args.selected_reserve,
+                comparison_csv_path=args.comparison_output,
+                figure_path=args.figure_output,
+                json_path=args.json_output,
+                markdown_path=args.markdown_output,
+            )
+        except (SimulationError, ValueError, OSError) as exc:
+            print(f"Donor reserve holdout failed: {exc}")
+            return 1
+
+        comparison = experiment.holdout_comparison
+        print(f"Frozen donor reserve: {experiment.selected_reserve}")
+        print(f"Holdout pattern: {comparison['pattern_on_frozen_pareto_axes']}")
+        print(
+            "Reserve change failed/harmed/p10pp: "
+            f"{comparison['failed_rentals_change']:+}/"
+            f"{comparison['harmed_requests_change']:+}/"
+            f"{comparison['p10_service_rate_pp_change']:+.3f}"
+        )
         print(f"Report: {args.markdown_output}")
         return 0
     if args.command == "run-simulation":

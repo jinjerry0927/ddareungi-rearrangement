@@ -436,6 +436,21 @@ class DonorReserveExperiment:
     output_files: dict[str, str]
 
 
+@dataclass(frozen=True)
+class DonorReserveHoldoutExperiment:
+    generated_at_utc: str
+    method: str
+    evaluation_window: str
+    stations: int
+    selected_reserve: int
+    selection_basis: str
+    policies: dict[str, dict[str, Any]]
+    policy_runs: tuple[dict[str, Any], ...]
+    holdout_comparison: dict[str, Any]
+    limitations: tuple[str, ...]
+    output_files: dict[str, str]
+
+
 DEFAULT_CANDIDATES = (
     ThresholdCandidate("conservative", 1, 4, 8),
     ThresholdCandidate("balanced", 2, 5, 8),
@@ -2592,6 +2607,340 @@ Pareto | 지배 후보 |
 """
 
 
+def run_donor_reserve_holdout(
+    scenario: ReplayScenario,
+    coordinates: dict[str, tuple[float, float]],
+    *,
+    selected_reserve: int = 7,
+) -> tuple[pl.DataFrame, tuple[SimulationRun, ...]]:
+    if not 5 < selected_reserve <= 8:
+        raise ValueError("홀드아웃 보호 reserve는 기존 서비스 reserve 5보다 크고 8 이하여야 합니다")
+    if set(scenario.initial_inventory) != set(coordinates):
+        raise SimulationError("donor reserve 홀드아웃 시나리오와 좌표 대여소 범위가 다릅니다")
+    policies: tuple[tuple[str, str, int | None, RelocationPolicy], ...] = (
+        ("P0", "재배치 없음", None, NoRelocationPolicy()),
+        (
+            "P2",
+            "서비스 reserve 5",
+            5,
+            GreedyNearestPolicy(
+                coordinates=coordinates,
+                donor_reserve_bikes=5,
+                max_actions_per_decision=3,
+                vehicle_capacity=10,
+                average_speed_kmh=20.0,
+                name="greedy_service_reserve_5",
+            ),
+        ),
+        (
+            "P3",
+            f"보호 reserve {selected_reserve}",
+            selected_reserve,
+            GreedyNearestPolicy(
+                coordinates=coordinates,
+                donor_reserve_bikes=selected_reserve,
+                max_actions_per_decision=3,
+                vehicle_capacity=10,
+                average_speed_kmh=20.0,
+                name=f"greedy_protected_reserve_{selected_reserve}",
+            ),
+        ),
+    )
+    runs = tuple(
+        simulate_replay(scenario, policy, collect_trace=True) for _, _, _, policy in policies
+    )
+    baseline_run = runs[0]
+    baseline_failures = baseline_run.station_metrics.select(
+        "station_id", pl.col("failed_rentals").alias("baseline_failed")
+    )
+    active_station_ids = set(
+        baseline_run.station_metrics.filter(pl.col("requests") > 0)["station_id"].to_list()
+    )
+    records: list[dict[str, Any]] = []
+    for (policy_role, policy_label, reserve, _), run in zip(policies, runs, strict=True):
+        if run.metrics.observed_requests != baseline_run.metrics.observed_requests:
+            raise SimulationError(f"{policy_label} 요청 수가 P0와 다릅니다")
+        if run.metrics.conservation_residual != 0:
+            raise SimulationError(f"{policy_label} 자전거 보존식 잔차가 0이 아닙니다")
+        if int(run.station_metrics["failed_rentals"].sum()) != run.metrics.failed_rentals:
+            raise SimulationError(f"{policy_label} 대여소 실패 합계가 전체 실패와 다릅니다")
+        rescued, harmed = (
+            (0, 0) if policy_role == "P0" else _count_request_transitions(baseline_run, run)
+        )
+        net_failures_avoided = baseline_run.metrics.failed_rentals - run.metrics.failed_rentals
+        if rescued - harmed != net_failures_avoided:
+            raise SimulationError(f"{policy_label} rescue-harm 재조정이 맞지 않습니다")
+        station_effects = baseline_failures.join(
+            run.station_metrics.select(
+                "station_id", pl.col("failed_rentals").alias("policy_failed")
+            ),
+            on="station_id",
+            how="inner",
+            validate="1:1",
+        ).with_columns(
+            (pl.col("baseline_failed") - pl.col("policy_failed")).alias("failures_avoided")
+        )
+        active_effects = station_effects.filter(pl.col("station_id").is_in(active_station_ids))
+        improvements = active_effects["failures_avoided"]
+        records.append(
+            {
+                "policy_role": policy_role,
+                "policy_label": policy_label,
+                "donor_reserve_bikes": reserve,
+                **asdict(run.metrics),
+                "rescued_requests_vs_p0": rescued,
+                "harmed_requests_vs_p0": harmed,
+                "net_failures_avoided_vs_p0": net_failures_avoided,
+                "transition_reconciliation_residual": rescued - harmed - net_failures_avoided,
+                "stations_improved_vs_p0": int((improvements > 0).sum()),
+                "stations_tied_vs_p0": int((improvements == 0).sum()),
+                "stations_worsened_vs_p0": int((improvements < 0).sum()),
+                "failures_added_at_worsened_stations": int(
+                    -active_effects.filter(pl.col("failures_avoided") < 0)["failures_avoided"].sum()
+                ),
+            }
+        )
+    return pl.DataFrame(records), runs
+
+
+def build_donor_reserve_holdout(
+    *,
+    trips_path: Path,
+    station_hour_path: Path,
+    coordinate_path: Path,
+    evaluation_start: datetime,
+    evaluation_end: datetime,
+    selected_reserve: int,
+    comparison_csv_path: Path,
+    figure_path: Path,
+    json_path: Path,
+    markdown_path: Path,
+) -> DonorReserveHoldoutExperiment:
+    try:
+        trips = pl.read_parquet(trips_path)
+        station_hour = pl.read_parquet(station_hour_path)
+        coordinate_frame = pl.read_csv(
+            coordinate_path,
+            schema_overrides={"station_id": pl.String},
+        )
+    except (OSError, pl.exceptions.PolarsError) as exc:
+        raise SimulationError(f"donor reserve 홀드아웃 입력을 읽지 못했습니다: {exc}") from exc
+    required_coordinate_columns = {"station_id", "latitude", "longitude"}
+    missing_columns = required_coordinate_columns - set(coordinate_frame.columns)
+    if missing_columns:
+        raise SimulationError(f"좌표 필수 열 누락: {sorted(missing_columns)}")
+    if coordinate_frame["station_id"].n_unique() != coordinate_frame.height:
+        raise SimulationError("좌표 대여소 ID가 중복됐습니다")
+    coordinates = {
+        str(row["station_id"]): (float(row["latitude"]), float(row["longitude"]))
+        for row in coordinate_frame.iter_rows(named=True)
+    }
+    scenario = build_replay_scenario(
+        trips,
+        station_hour,
+        SimulationConfig(
+            start=evaluation_start,
+            end=evaluation_end,
+            decision_interval_minutes=60,
+            max_bikes_per_decision=40,
+        ),
+        eligible_station_ids=set(coordinates),
+    )
+    frame, runs = run_donor_reserve_holdout(
+        scenario,
+        coordinates,
+        selected_reserve=selected_reserve,
+    )
+    rows = {str(row["policy_role"]): row for row in frame.to_dicts()}
+    service = rows["P2"]
+    protected = rows["P3"]
+    failed_change = int(protected["failed_rentals"] - service["failed_rentals"])
+    harm_change = int(protected["harmed_requests_vs_p0"] - service["harmed_requests_vs_p0"])
+    p10_change = round(
+        (protected["p10_station_service_rate"] - service["p10_station_service_rate"]) * 100,
+        3,
+    )
+    protected_no_worse = failed_change <= 0 and harm_change <= 0 and p10_change >= 0
+    service_no_worse = failed_change >= 0 and harm_change >= 0 and p10_change <= 0
+    if protected_no_worse and (failed_change < 0 or harm_change < 0 or p10_change > 0):
+        pattern = "protected_reserve_dominates"
+    elif service_no_worse and (failed_change > 0 or harm_change > 0 or p10_change < 0):
+        pattern = "service_reserve_dominates"
+    else:
+        pattern = "tradeoff_persists"
+    holdout_comparison = {
+        "comparison": f"reserve_{selected_reserve}_minus_reserve_5",
+        "pattern_on_frozen_pareto_axes": pattern,
+        "failed_rentals_change": failed_change,
+        "harmed_requests_change": harm_change,
+        "harm_requests_reduced": -harm_change,
+        "p10_service_rate_pp_change": p10_change,
+        "stations_worsened_change": int(
+            protected["stations_worsened_vs_p0"] - service["stations_worsened_vs_p0"]
+        ),
+        "failures_added_at_worsened_stations_change": int(
+            protected["failures_added_at_worsened_stations"]
+            - service["failures_added_at_worsened_stations"]
+        ),
+        "empty_station_hours_change": round(
+            protected["empty_station_hours"] - service["empty_station_hours"], 3
+        ),
+        "bikes_moved_change": int(protected["bikes_moved"] - service["bikes_moved"]),
+        "relocation_distance_km_change": round(
+            protected["relocation_distance_km"] - service["relocation_distance_km"], 3
+        ),
+        "relocation_vehicle_minutes_change": round(
+            protected["relocation_vehicle_minutes"] - service["relocation_vehicle_minutes"],
+            3,
+        ),
+        "selection_reopened_after_holdout": False,
+    }
+    comparison_csv_path.parent.mkdir(parents=True, exist_ok=True)
+    frame.write_csv(comparison_csv_path)
+    _plot_donor_reserve_holdout(frame, figure_path)
+    output_files = {
+        "holdout_comparison": str(comparison_csv_path),
+        "holdout_figure": str(figure_path),
+        "json_report": str(json_path),
+        "markdown_report": str(markdown_path),
+    }
+    experiment = DonorReserveHoldoutExperiment(
+        generated_at_utc=datetime.now(UTC).isoformat(),
+        method="frozen_single_holdout_donor_reserve_comparison",
+        evaluation_window=f"{evaluation_start.isoformat()} <= t < {evaluation_end.isoformat()}",
+        stations=len(coordinates),
+        selected_reserve=selected_reserve,
+        selection_basis=(
+            "학습기간 reserve 5→7에서 악화 요청 400건 감소, 실패 352건 증가, "
+            "p10 1.49%p 감소인 Pareto 절충점을 홀드아웃 전에 고정"
+        ),
+        policies={
+            "P0": {"description": "재배치 없음"},
+            "P2": {
+                "description": "기존 서비스형 비교 기준",
+                "donor_reserve_bikes": 5,
+                "max_actions_per_decision": 3,
+                "average_speed_kmh": 20.0,
+                "vehicle_capacity": 10,
+            },
+            "P3": {
+                "description": "공급지 보호형 평가 정책",
+                "donor_reserve_bikes": selected_reserve,
+                "max_actions_per_decision": 3,
+                "average_speed_kmh": 20.0,
+                "vehicle_capacity": 10,
+            },
+        },
+        policy_runs=tuple(frame.to_dicts()),
+        holdout_comparison=holdout_comparison,
+        limitations=(
+            "홀드아웃 결과를 본 뒤 donor reserve를 재선택하지 않았다.",
+            "공개 이력의 성공 요청만 재생해 품절로 관측되지 않은 잠재 수요는 제외한다.",
+            "현재 좌표 스냅샷이 2025년 운영 당시 위치와 다를 수 있다.",
+            "차량 첫 접근 이동·연속 경로·실제 교통과 반납 실패를 반영하지 않는다.",
+            "형평성은 대여소별 서비스율 분포 대리변수이며 인구 특성을 반영하지 않는다.",
+            "동일한 5일 홀드아웃은 앞선 P2 운영능력 분석에도 사용됐다.",
+        ),
+        output_files=output_files,
+    )
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    markdown_path.parent.mkdir(parents=True, exist_ok=True)
+    json_path.write_text(
+        json.dumps(asdict(experiment), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    markdown_path.write_text(
+        _render_donor_reserve_holdout_markdown(experiment),
+        encoding="utf-8",
+    )
+    return experiment
+
+
+def _render_donor_reserve_holdout_markdown(
+    experiment: DonorReserveHoldoutExperiment,
+) -> str:
+    rows = "\n".join(
+        "| {role} | {reserve} | {service:.2%} | {failed:,} | {rescued:,} | "
+        "{harmed:,} | {p10:.2%} | {worsened} | {moved:,} | {distance:,.1f} |".format(
+            role=row["policy_role"],
+            reserve=row["donor_reserve_bikes"] if row["donor_reserve_bikes"] is not None else "-",
+            service=row["service_rate"],
+            failed=row["failed_rentals"],
+            rescued=row["rescued_requests_vs_p0"],
+            harmed=row["harmed_requests_vs_p0"],
+            p10=row["p10_station_service_rate"],
+            worsened=row["stations_worsened_vs_p0"],
+            moved=row["bikes_moved"],
+            distance=row["relocation_distance_km"],
+        )
+        for row in experiment.policy_runs
+    )
+    comparison = experiment.holdout_comparison
+    limitations = "\n".join(f"- {item}" for item in experiment.limitations)
+    pattern_text = {
+        "protected_reserve_dominates": "보호형 reserve가 세 동결 축에서 서비스형을 지배했다.",
+        "service_reserve_dominates": "서비스형 reserve가 세 동결 축에서 보호형을 지배했다.",
+        "tradeoff_persists": "학습기간과 마찬가지로 서비스와 요청 보호의 절충이 남았다.",
+    }[str(comparison["pattern_on_frozen_pareto_axes"])]
+    return f"""# 강남구 P3 donor reserve 단일 홀드아웃 검증
+
+## 결론
+
+- 선택값: donor reserve {experiment.selected_reserve}대
+- 선택 근거: {experiment.selection_basis}
+- 평가 패턴: `{comparison["pattern_on_frozen_pareto_axes"]}` — {pattern_text}
+- reserve 5 대비 실패 변화: {comparison["failed_rentals_change"]:+,}건
+- reserve 5 대비 악화 요청 변화: {comparison["harmed_requests_change"]:+,}건
+- reserve 5 대비 p10 변화: {comparison["p10_service_rate_pp_change"]:+.3f}%p
+- 홀드아웃 후 재선택: 아니오
+
+## 동결 평가 계약
+
+- 방법: `{experiment.method}`
+- 평가기간: `{experiment.evaluation_window}`
+- 동일 대여소: {experiment.stations}개
+- P2와 P3의 운영능력: 시간당 직접 운송 3회, 20km/h, 적재 10대
+- P2 reserve 5와 P3 reserve {experiment.selected_reserve}의 차이는 공급지 보유 하한뿐
+- P0 trace는 한 번만 실행하고 같은 trip ID·시각·대여소 요청을 비교
+- 결과를 본 뒤 reserve를 재튜닝하거나 후보를 추가하지 않음
+
+## 결과
+
+| 정책 | reserve | 성공률 | 실패 | 구제 | 악화 | p10 | 악화 대여소 | 이동 대수 | 거리(km) |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+{rows}
+
+## reserve {experiment.selected_reserve} - reserve 5
+
+- 전체 실패: {comparison["failed_rentals_change"]:+,}건
+- P0 성공→정책 실패인 악화 요청: {comparison["harmed_requests_change"]:+,}건
+- 요청 10건 이상 대여소 p10: {comparison["p10_service_rate_pp_change"]:+.3f}%p
+- P0보다 악화된 대여소: {comparison["stations_worsened_change"]:+,}곳
+- 악화 대여소 추가 실패: {comparison["failures_added_at_worsened_stations_change"]:+,}건
+- 빈 대여소 누적: {comparison["empty_station_hours_change"]:+,.1f}시간
+- 이동 대수: {comparison["bikes_moved_change"]:+,}대
+- 재배치 거리: {comparison["relocation_distance_km_change"]:+,.1f}km
+- 차량시간: {comparison["relocation_vehicle_minutes_change"]:+,.1f}분
+
+## 불변조건
+
+- 모든 정책은 같은 초기 재고, 대여소, 요청 순서와 시간 범위를 쓴다.
+- 구제 요청 - 악화 요청 = P0 대비 순 실패 방지다.
+- 성공 + 실패 = 전체 요청이며 모든 정책의 자전거 보존식 잔차는 0이다.
+- P2와 P3는 donor reserve 외의 운영 파라미터가 같다.
+
+## 해석 제한
+
+{limitations}
+
+## 다음 단계
+
+1. reserve {experiment.selected_reserve}을 P3 정책 기본안으로 기록한다.
+2. 이동 차량의 첫 접근·연속 경로를 추가해 운영거리의 낙관 편향을 줄인다.
+3. 잠재 수요 시나리오로 관측수요 재생의 품절 과소추정을 범위화한다.
+"""
+
+
 def run_request_transition_trace(
     scenario: ReplayScenario,
     coordinates: dict[str, tuple[float, float]],
@@ -3638,6 +3987,115 @@ def _plot_donor_reserve_training(frame: pl.DataFrame, path: Path) -> None:
             if any(pareto):
                 axis.legend()
         figure.suptitle("강남구 학습기간: P3 donor reserve Pareto 비교")
+        figure.tight_layout()
+        figure.savefig(path, dpi=160)
+        plt.close(figure)
+
+
+def _plot_donor_reserve_holdout(frame: pl.DataFrame, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    labels = frame["policy_role"].to_list()
+    x_values = list(range(len(labels)))
+    malgun_path = Path("C:/Windows/Fonts/malgun.ttf")
+    font_family = "DejaVu Sans"
+    if malgun_path.exists():
+        font_manager.fontManager.addfont(str(malgun_path))
+        font_family = font_manager.FontProperties(fname=str(malgun_path)).get_name()
+    with plt.rc_context({"font.family": font_family, "axes.unicode_minus": False}):
+        figure, axes = plt.subplots(2, 2, figsize=(14, 9.5))
+        failed = frame["failed_rentals"].to_list()
+        rescued = frame["rescued_requests_vs_p0"].to_list()
+        harmed = frame["harmed_requests_vs_p0"].to_list()
+        bar_width = 0.24
+        axes[0, 0].bar(
+            [value - bar_width for value in x_values],
+            failed,
+            width=bar_width,
+            label="실패",
+            color="#4e79a7",
+        )
+        axes[0, 0].bar(
+            x_values,
+            rescued,
+            width=bar_width,
+            label="구제",
+            color="#59a14f",
+        )
+        axes[0, 0].bar(
+            [value + bar_width for value in x_values],
+            harmed,
+            width=bar_width,
+            label="악화",
+            color="#e15759",
+        )
+        axes[0, 0].set_title("요청 결과 전환")
+        axes[0, 0].set_ylabel("요청(건)")
+        axes[0, 0].set_xticks(x_values, labels)
+        axes[0, 0].legend()
+
+        service_rates = [value * 100 for value in frame["service_rate"].to_list()]
+        p10_rates = [value * 100 for value in frame["p10_station_service_rate"].to_list()]
+        axes[0, 1].bar(
+            [value - bar_width / 2 for value in x_values],
+            service_rates,
+            width=bar_width,
+            label="전체",
+            color="#76b7b2",
+        )
+        axes[0, 1].bar(
+            [value + bar_width / 2 for value in x_values],
+            p10_rates,
+            width=bar_width,
+            label="p10",
+            color="#f28e2b",
+        )
+        axes[0, 1].set_title("전체·하위 대여소 성공률")
+        axes[0, 1].set_ylabel("성공률(%)")
+        axes[0, 1].set_xticks(x_values, labels)
+        axes[0, 1].legend()
+
+        improved = frame["stations_improved_vs_p0"].to_list()
+        tied = frame["stations_tied_vs_p0"].to_list()
+        worsened = frame["stations_worsened_vs_p0"].to_list()
+        axes[1, 0].bar(labels, improved, label="개선", color="#59a14f")
+        axes[1, 0].bar(labels, tied, bottom=improved, label="동률", color="#bab0ac")
+        axes[1, 0].bar(
+            labels,
+            worsened,
+            bottom=[a + b for a, b in zip(improved, tied, strict=True)],
+            label="악화",
+            color="#e15759",
+        )
+        axes[1, 0].set_title("활성 대여소별 P0 대비 결과")
+        axes[1, 0].set_ylabel("대여소(곳)")
+        axes[1, 0].set_ylim(
+            0,
+            max(a + b + c for a, b, c in zip(improved, tied, worsened, strict=True)) * 1.08,
+        )
+        axes[1, 0].legend()
+
+        moved = frame["bikes_moved"].to_list()
+        distance = frame["relocation_distance_km"].to_list()
+        axes[1, 1].bar(labels, moved, color="#4e79a7", label="이동 대수")
+        axes[1, 1].set_title("재배치 운영량")
+        axes[1, 1].set_ylabel("이동 대수")
+        distance_axis = axes[1, 1].twinx()
+        distance_axis.plot(
+            labels,
+            distance,
+            marker="o",
+            linewidth=2,
+            color="#f28e2b",
+            label="거리",
+        )
+        distance_axis.set_ylabel("거리(km)")
+        handles, legend_labels = axes[1, 1].get_legend_handles_labels()
+        distance_handles, distance_labels = distance_axis.get_legend_handles_labels()
+        axes[1, 1].legend(handles + distance_handles, legend_labels + distance_labels)
+
+        for axis in axes.flat:
+            axis.grid(axis="y", alpha=0.2)
+        figure.suptitle("강남구 donor reserve 단일 홀드아웃: P0·P2·P3")
         figure.tight_layout()
         figure.savefig(path, dpi=160)
         plt.close(figure)

@@ -1,6 +1,6 @@
 # 프로젝트 상태
 
-- 단계: M8 P3 donor reserve 학습기간 Pareto 분석
+- 단계: M9 P3 donor reserve 단일 홀드아웃 검증
 - 상태: 완료
 - 기준일: 2026-08-20
 
@@ -91,16 +91,27 @@
 - 전체 실패 최소·악화 요청 최소·p10 최대 Pareto에서 네 후보 모두 비지배임을 확인
 - 가중점수 없이 단일 후보를 선택할 수 없어 홀드아웃 실행 전 사용자 결정 지점으로 중단
 - donor reserve 학습 CSV·JSON·Markdown·Pareto PNG 생성
+- 학습기간 Pareto 절충점인 reserve 7을 평가 전에 동결하고 재튜닝 금지 계약 기록
+- 11월 24~28일 동일 165개 대여소·16,205건에서 P0·reserve 5·reserve 7 단일 실행
+- P0·reserve 5·reserve 7의 실패 1,905·661·691건, 성공률 88.24·95.92·95.74% 산출
+- reserve 7은 reserve 5 대비 악화 요청을 122→100건, 악화 대여소를 17→12곳으로 감소
+- 악화 대여소 추가 실패도 47→37건으로 줄어 공급 대여소 보호 방향이 홀드아웃에서 재현
+- 대신 reserve 7은 reserve 5보다 전체 실패 30건, 빈 대여소 누적 74.6시간 증가
+- 요청 10건 이상 대여소 p10은 89.09→87.80%로 1.286%p 감소
+- 이동 대수는 1,435→1,224대로 감소했지만 재배치 거리는 336.8→359.2km로 증가
+- 세 정책의 요청 trace 재조정 잔차와 자전거 보존식 잔차가 모두 0임을 확인
+- 홀드아웃 결과로 후보를 다시 고르지 않고 `tradeoff_persists`로 정직하게 판정
+- donor reserve 홀드아웃 CSV·JSON·Markdown·PNG 생성 및 차트 렌더링 확인
 
 ## 현재 목표
 
-donor reserve 후보 중 홀드아웃에 한 번 적용할 값을 결정한다.
+동결한 donor reserve 7의 단일 홀드아웃 검증을 완료하고 P3 기본안으로 기록했다.
 
 ## 다음 작업
 
-1. 사용자가 서비스 우선 5, 균형 후보 7, 악화 최소 8 중 운영 우선값을 확인한다.
-2. 선택값과 평가 지표를 고정한 뒤 11월 24~28일 홀드아웃을 한 번만 실행한다.
-3. P2 reserve 5 대비 전체 실패·악화 요청·p10·거리·이동량을 함께 판정한다.
+1. README를 현재 M9 결과와 재현 명령 중심의 포트폴리오 첫 화면으로 갱신한다.
+2. 차량의 첫 접근·연속 경로를 넣기 전 차량 수·초기 위치·운행 계약을 명시한다.
+3. 새 운영 모델은 정책 재튜닝이 아닌 P3 결과의 민감도 범위로 분리한다.
 
 ## 현재 데이터 리스크
 
@@ -127,6 +138,8 @@ donor reserve 후보 중 홀드아웃에 한 번 적용할 값을 결정한다.
 - 악화 요청은 순악화 지점뿐 아니라 전체로는 개선된 대여소에서도 발생한다.
 - donor reserve 네 후보가 모두 비지배라 운영 가치 없이는 데이터만으로 단일값을 고를 수 없다.
 - reserve 7은 reserve 5 대비 악화 400건 감소와 실패 352건 증가의 절충이나 자동 최적은 아니다.
+- reserve 7 홀드아웃도 악화 요청 22건 감소와 실패 30건 증가의 절충이어서 유일한 최적안이 아니다.
+- reserve 7은 이동 대수를 줄였지만 더 먼 공급지를 선택해 총 거리가 22.4km 늘었다.
 - 자세한 결과: `reports/live_api_schema.md`
 - 과거 데이터 상세 결과: `reports/historical_data_audit.md`
 - 강남구 기준선 결과: `reports/gangnam_2025_11_baseline.md`
@@ -137,6 +150,7 @@ donor reserve 후보 중 홀드아웃에 한 번 적용할 값을 결정한다.
 - P2 대여소별 공간 형평성 결과: `reports/gangnam_2025_11_station_equity.md`
 - P2 요청 단위 악화·구제 추적 결과: `reports/gangnam_2025_11_harm_trace.md`
 - P3 donor reserve 학습 Pareto 결과: `reports/gangnam_2025_11_donor_reserve_training.md`
+- P3 donor reserve 단일 홀드아웃 결과: `reports/gangnam_2025_11_donor_reserve_holdout.md`
 
 ## 최근 검증
 
@@ -146,7 +160,7 @@ donor reserve 후보 중 홀드아웃에 한 번 적용할 값을 결정한다.
 
 - Ruff lint: PASS
 - Ruff format: PASS
-- pytest: 24 passed
+- pytest: 25 passed
 - 프로젝트 환경 진단: PASS
 - API 키: 설정 확인, 값은 출력·보고서·Git에서 제외
 - 과거 데이터 감사: PASS_WITH_WARNINGS
@@ -159,7 +173,8 @@ donor reserve 후보 중 홀드아웃에 한 번 적용할 값을 결정한다.
 - P2 30일 시간적 강건성 분석: PASS
 - P2 165개 대여소 공간 형평성 분석: PASS
 - P2 요청 단위 악화·구제 trace 분석: PASS
-- P3 donor reserve 학습 Pareto 분석: PASS, 운영값 결정 대기
+- P3 donor reserve 학습 Pareto 분석: PASS
+- P3 reserve 7 단일 홀드아웃 검증: PASS, 학습기간과 같은 절충 재현
 
 ## 중단 규칙
 
