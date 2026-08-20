@@ -12,6 +12,7 @@ from ddareungi_rearrangement.simulation import (
     build_replay_scenario,
     run_daily_policy_comparison,
     run_spatial_sensitivity,
+    run_station_equity_comparison,
     simulate_replay,
     snapshot_actionable_coordinates,
 )
@@ -315,3 +316,36 @@ def test_daily_policy_comparison_resets_inventory_and_preserves_daily_contract()
         ]
         == 0
     ).all()
+
+
+def test_station_equity_comparison_preserves_requests_and_reconciles_failures() -> None:
+    start = datetime(2025, 11, 24)
+    end = datetime(2025, 11, 24, 1)
+    trips = pl.DataFrame(
+        {
+            "rent_at": [datetime(2025, 11, 24, 0, 10)],
+            "return_at": [datetime(2025, 11, 24, 0, 30)],
+            "rent_station_id": ["A"],
+            "return_station_id": ["OUT"],
+        }
+    )
+    scenario = build_replay_scenario(
+        trips,
+        _station_hour(start, bikes_a=0, bikes_b=10),
+        SimulationConfig(start=start, end=end, max_bikes_per_decision=40),
+    )
+
+    frame, runs = run_station_equity_comparison(
+        scenario,
+        {"A": (37.5, 127.0), "B": (37.5, 127.001)},
+    )
+
+    assert frame.height == 2
+    assert len(runs) == 3
+    assert frame["requests"].sum() == 1
+    assert frame["p0_failed_rentals"].sum() == runs[0][1].metrics.failed_rentals
+    assert frame["default_failed_rentals"].sum() == runs[1][1].metrics.failed_rentals
+    assert frame["service_failed_rentals"].sum() == runs[2][1].metrics.failed_rentals
+    assert frame["default_failures_avoided_vs_p0"].sum() == 1
+    assert frame["service_failures_avoided_vs_p0"].sum() == 1
+    assert all(run.metrics.conservation_residual == 0 for _, run in runs)

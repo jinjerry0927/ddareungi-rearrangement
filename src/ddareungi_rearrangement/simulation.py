@@ -383,6 +383,21 @@ class TemporalRobustnessExperiment:
     output_files: dict[str, str]
 
 
+@dataclass(frozen=True)
+class StationEquityExperiment:
+    generated_at_utc: str
+    method: str
+    evaluation_window: str
+    stations: int
+    coordinate_file: str
+    policies: dict[str, dict[str, Any]]
+    policy_runs: tuple[dict[str, Any], ...]
+    equity_summaries: dict[str, dict[str, Any]]
+    station_results: tuple[dict[str, Any], ...]
+    limitations: tuple[str, ...]
+    output_files: dict[str, str]
+
+
 DEFAULT_CANDIDATES = (
     ThresholdCandidate("conservative", 1, 4, 8),
     ThresholdCandidate("balanced", 2, 5, 8),
@@ -1823,6 +1838,409 @@ def _summarize_effect_consistency(frame: pl.DataFrame) -> dict[str, dict[str, An
     return summaries
 
 
+def run_station_equity_comparison(
+    scenario: ReplayScenario,
+    coordinates: dict[str, tuple[float, float]],
+) -> tuple[pl.DataFrame, tuple[tuple[str, SimulationRun], ...]]:
+    if set(scenario.initial_inventory) != set(coordinates):
+        raise SimulationError("공간 형평성 시나리오와 좌표 대여소 범위가 다릅니다")
+    policies: tuple[tuple[str, RelocationPolicy], ...] = (
+        ("P0 재배치 없음", NoRelocationPolicy()),
+        (
+            "P2 기존 2회·15km/h",
+            GreedyNearestPolicy(
+                coordinates=coordinates,
+                max_actions_per_decision=2,
+                vehicle_capacity=20,
+                average_speed_kmh=15.0,
+                name="greedy_default",
+            ),
+        ),
+        (
+            "P2 서비스 3회·20km/h",
+            GreedyNearestPolicy(
+                coordinates=coordinates,
+                max_actions_per_decision=3,
+                vehicle_capacity=10,
+                average_speed_kmh=20.0,
+                name="greedy_service",
+            ),
+        ),
+    )
+    runs = tuple((label, simulate_replay(scenario, policy)) for label, policy in policies)
+    baseline = runs[0][1].station_metrics.select(
+        "station_id",
+        "station_name",
+        "requests",
+        pl.col("successful_rentals").alias("p0_successful_rentals"),
+        pl.col("failed_rentals").alias("p0_failed_rentals"),
+        pl.col("service_rate").alias("p0_service_rate"),
+        pl.col("empty_minutes").alias("p0_empty_minutes"),
+        pl.col("empty_rate").alias("p0_empty_rate"),
+        pl.col("initial_bikes").alias("initial_bikes"),
+        pl.col("final_bikes").alias("p0_final_bikes"),
+    )
+    frame = baseline
+    for prefix, run in (("default", runs[1][1]), ("service", runs[2][1])):
+        policy_frame = run.station_metrics.select(
+            "station_id",
+            pl.col("requests").alias(f"{prefix}_requests"),
+            pl.col("successful_rentals").alias(f"{prefix}_successful_rentals"),
+            pl.col("failed_rentals").alias(f"{prefix}_failed_rentals"),
+            pl.col("service_rate").alias(f"{prefix}_service_rate"),
+            pl.col("empty_minutes").alias(f"{prefix}_empty_minutes"),
+            pl.col("empty_rate").alias(f"{prefix}_empty_rate"),
+            pl.col("relocated_in").alias(f"{prefix}_relocated_in"),
+            pl.col("relocated_out").alias(f"{prefix}_relocated_out"),
+            pl.col("final_bikes").alias(f"{prefix}_final_bikes"),
+        )
+        frame = frame.join(policy_frame, on="station_id", how="inner", validate="1:1")
+        if not (frame["requests"] == frame[f"{prefix}_requests"]).all():
+            raise SimulationError(f"{prefix} 정책의 대여소별 요청 수가 P0와 다릅니다")
+        frame = frame.drop(f"{prefix}_requests").with_columns(
+            (pl.col("p0_failed_rentals") - pl.col(f"{prefix}_failed_rentals")).alias(
+                f"{prefix}_failures_avoided_vs_p0"
+            ),
+            ((pl.col(f"{prefix}_service_rate") - pl.col("p0_service_rate")) * 100)
+            .round(3)
+            .alias(f"{prefix}_service_rate_pp_vs_p0"),
+            ((pl.col("p0_empty_minutes") - pl.col(f"{prefix}_empty_minutes")) / 60)
+            .round(3)
+            .alias(f"{prefix}_empty_hours_reduced_vs_p0"),
+        )
+    coordinate_frame = pl.DataFrame(
+        [
+            {
+                "station_id": station_id,
+                "latitude": latitude,
+                "longitude": longitude,
+            }
+            for station_id, (latitude, longitude) in coordinates.items()
+        ]
+    )
+    frame = frame.join(coordinate_frame, on="station_id", how="inner", validate="1:1")
+    frame = frame.with_columns(
+        (pl.col("default_failed_rentals") - pl.col("service_failed_rentals")).alias(
+            "service_additional_failures_avoided_vs_default"
+        )
+    ).sort("station_id")
+    if frame.height != len(coordinates):
+        raise SimulationError("공간 형평성 대여소 조인 후 행 수가 달라졌습니다")
+    return frame, runs
+
+
+def build_station_equity(
+    *,
+    trips_path: Path,
+    station_hour_path: Path,
+    coordinate_path: Path,
+    evaluation_start: datetime,
+    evaluation_end: datetime,
+    station_csv_path: Path,
+    figure_path: Path,
+    json_path: Path,
+    markdown_path: Path,
+) -> StationEquityExperiment:
+    try:
+        trips = pl.read_parquet(trips_path)
+        station_hour = pl.read_parquet(station_hour_path)
+        coordinate_frame = pl.read_csv(
+            coordinate_path,
+            schema_overrides={"station_id": pl.String},
+        )
+    except (OSError, pl.exceptions.PolarsError) as exc:
+        raise SimulationError(f"공간 형평성 입력을 읽지 못했습니다: {exc}") from exc
+    required_coordinate_columns = {"station_id", "latitude", "longitude"}
+    missing_columns = required_coordinate_columns - set(coordinate_frame.columns)
+    if missing_columns:
+        raise SimulationError(f"좌표 필수 열 누락: {sorted(missing_columns)}")
+    if coordinate_frame["station_id"].n_unique() != coordinate_frame.height:
+        raise SimulationError("좌표 대여소 ID가 중복됐습니다")
+    coordinates = {
+        str(row["station_id"]): (float(row["latitude"]), float(row["longitude"]))
+        for row in coordinate_frame.iter_rows(named=True)
+    }
+    scenario = build_replay_scenario(
+        trips,
+        station_hour,
+        SimulationConfig(
+            start=evaluation_start,
+            end=evaluation_end,
+            decision_interval_minutes=60,
+            max_bikes_per_decision=40,
+        ),
+        eligible_station_ids=set(coordinates),
+    )
+    station_frame, runs = run_station_equity_comparison(scenario, coordinates)
+    equity_summaries = _summarize_station_equity(station_frame, runs)
+    station_csv_path.parent.mkdir(parents=True, exist_ok=True)
+    station_frame.write_csv(station_csv_path)
+    _plot_station_equity(station_frame, runs, figure_path)
+    output_files = {
+        "station_comparison": str(station_csv_path),
+        "equity_figure": str(figure_path),
+        "json_report": str(json_path),
+        "markdown_report": str(markdown_path),
+    }
+    experiment = StationEquityExperiment(
+        generated_at_utc=datetime.now(UTC).isoformat(),
+        method="continuous_holdout_station_equity_replay",
+        evaluation_window=f"{evaluation_start.isoformat()} <= t < {evaluation_end.isoformat()}",
+        stations=station_frame.height,
+        coordinate_file=str(coordinate_path),
+        policies={
+            "no_relocation": {"label": runs[0][0]},
+            "greedy_default": {
+                "label": runs[1][0],
+                "max_direct_trips_per_hour": 2,
+                "average_speed_kmh": 15.0,
+                "vehicle_capacity": 20,
+            },
+            "greedy_service": {
+                "label": runs[2][0],
+                "max_direct_trips_per_hour": 3,
+                "average_speed_kmh": 20.0,
+                "vehicle_capacity": 10,
+            },
+        },
+        policy_runs=tuple({"policy_label": label, **asdict(run.metrics)} for label, run in runs),
+        equity_summaries=equity_summaries,
+        station_results=tuple(station_frame.to_dicts()),
+        limitations=(
+            "공개 대여이력의 성공 요청만 재생해 미관측 잠재 수요의 공간 분포는 알 수 없다.",
+            "서비스 P2 조합은 같은 홀드아웃 민감도에서 선택돼 독립 검증 성과가 아니다.",
+            "대여소별 실패 감소는 형평성의 운영 대리변수이며 인구·소득·교통약자를 포함하지 않는다.",
+            "현재 좌표 스냅샷이 2025년 운영 당시 위치와 다를 수 있다.",
+            "차량 첫 접근 이동·연속 경로·실제 교통과 반납 실패를 반영하지 않는다.",
+        ),
+        output_files=output_files,
+    )
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    markdown_path.parent.mkdir(parents=True, exist_ok=True)
+    json_path.write_text(
+        json.dumps(asdict(experiment), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    markdown_path.write_text(_render_station_equity_markdown(experiment), encoding="utf-8")
+    return experiment
+
+
+def _summarize_station_equity(
+    frame: pl.DataFrame,
+    runs: tuple[tuple[str, SimulationRun], ...],
+) -> dict[str, dict[str, Any]]:
+    run_by_name = {run.metrics.policy_name: run for _, run in runs}
+    active = frame.filter(pl.col("requests") > 0)
+    summaries: dict[str, dict[str, Any]] = {}
+    for prefix, policy_name in (
+        ("default", "greedy_default"),
+        ("service", "greedy_service"),
+    ):
+        avoided_column = f"{prefix}_failures_avoided_vs_p0"
+        improvements = active[avoided_column]
+        positive = frame.filter(pl.col(avoided_column) > 0).sort(avoided_column, descending=True)
+        worsened = frame.filter(pl.col(avoided_column) < 0).sort(avoided_column)
+        top_ten = positive.head(10)
+        positive_total = int(positive[avoided_column].sum())
+        top_ten_total = int(top_ten[avoided_column].sum())
+        run = run_by_name[policy_name]
+        summaries[policy_name] = {
+            "stations": frame.height,
+            "stations_with_requests": active.height,
+            "stations_improved": int((improvements > 0).sum()),
+            "stations_tied": int((improvements == 0).sum()),
+            "stations_worsened": int((improvements < 0).sum()),
+            "net_failures_avoided": int(frame[avoided_column].sum()),
+            "positive_failures_avoided": positive_total,
+            "failures_added_at_worsened_stations": int(-worsened[avoided_column].sum()),
+            "top_10_positive_failures_avoided": top_ten_total,
+            "top_10_positive_concentration": _rate(top_ten_total, positive_total),
+            "overall_service_rate": run.metrics.service_rate,
+            "p10_station_service_rate": run.metrics.p10_station_service_rate,
+            "p10_service_rate_pp_vs_p0": round(
+                (
+                    run.metrics.p10_station_service_rate
+                    - run_by_name["no_relocation"].metrics.p10_station_service_rate
+                )
+                * 100,
+                3,
+            ),
+            "worst_station_id": run.metrics.worst_station_id,
+            "worst_station_name": run.metrics.worst_station_name,
+            "worst_station_service_rate": run.metrics.worst_station_service_rate,
+            "relocation_out_and_worsened_stations": frame.filter(
+                (pl.col(f"{prefix}_relocated_out") > 0) & (pl.col(avoided_column) < 0)
+            ).height,
+            "top_10_beneficiary_stations": tuple(
+                {
+                    "station_id": row["station_id"],
+                    "station_name": row["station_name"],
+                    "requests": row["requests"],
+                    "failures_avoided": row[avoided_column],
+                    "relocated_in": row[f"{prefix}_relocated_in"],
+                    "relocated_out": row[f"{prefix}_relocated_out"],
+                }
+                for row in top_ten.iter_rows(named=True)
+            ),
+            "worsened_stations": tuple(
+                {
+                    "station_id": row["station_id"],
+                    "station_name": row["station_name"],
+                    "requests": row["requests"],
+                    "failures_added": -row[avoided_column],
+                    "relocated_in": row[f"{prefix}_relocated_in"],
+                    "relocated_out": row[f"{prefix}_relocated_out"],
+                }
+                for row in worsened.iter_rows(named=True)
+            ),
+        }
+    return summaries
+
+
+def _render_station_equity_markdown(experiment: StationEquityExperiment) -> str:
+    default = experiment.equity_summaries["greedy_default"]
+    service = experiment.equity_summaries["greedy_service"]
+    p0 = next(row for row in experiment.policy_runs if row["policy_name"] == "no_relocation")
+    summary_rows = "\n".join(
+        "| {label} | {service_rate:.2%} | {p10:.2%} | {p10_delta:+.3f}%p | "
+        "{improved}/{tied}/{worsened} | {net:+,} | {harm:,} | {concentration:.2%} |".format(
+            label=experiment.policies[policy_name]["label"],
+            service_rate=summary["overall_service_rate"],
+            p10=summary["p10_station_service_rate"],
+            p10_delta=summary["p10_service_rate_pp_vs_p0"],
+            improved=summary["stations_improved"],
+            tied=summary["stations_tied"],
+            worsened=summary["stations_worsened"],
+            net=summary["net_failures_avoided"],
+            harm=summary["failures_added_at_worsened_stations"],
+            concentration=summary["top_10_positive_concentration"],
+        )
+        for policy_name, summary in (
+            ("greedy_default", default),
+            ("greedy_service", service),
+        )
+    )
+
+    def beneficiary_rows(policy_name: str, summary: dict[str, Any]) -> str:
+        return "\n".join(
+            "| {policy} | {station_id} {station_name} | {requests:,} | {avoided:+,} | "
+            "{relocated_in:,} | {relocated_out:,} |".format(
+                policy=experiment.policies[policy_name]["label"],
+                station_id=row["station_id"],
+                station_name=row["station_name"],
+                requests=row["requests"],
+                avoided=row["failures_avoided"],
+                relocated_in=row["relocated_in"],
+                relocated_out=row["relocated_out"],
+            )
+            for row in summary["top_10_beneficiary_stations"]
+        )
+
+    top_rows = "\n".join(
+        (
+            beneficiary_rows("greedy_default", default),
+            beneficiary_rows("greedy_service", service),
+        )
+    )
+
+    def worsened_rows(policy_name: str, summary: dict[str, Any]) -> str:
+        rows = summary["worsened_stations"][:10]
+        if not rows:
+            return f"| {experiment.policies[policy_name]['label']} | 없음 | - | - | - | - |"
+        return "\n".join(
+            "| {policy} | {station_id} {station_name} | {requests:,} | {added:,} | "
+            "{relocated_in:,} | {relocated_out:,} |".format(
+                policy=experiment.policies[policy_name]["label"],
+                station_id=row["station_id"],
+                station_name=row["station_name"],
+                requests=row["requests"],
+                added=row["failures_added"],
+                relocated_in=row["relocated_in"],
+                relocated_out=row["relocated_out"],
+            )
+            for row in rows
+        )
+
+    harm_rows = "\n".join(
+        (
+            worsened_rows("greedy_default", default),
+            worsened_rows("greedy_service", service),
+        )
+    )
+    limitations = "\n".join(f"- {item}" for item in experiment.limitations)
+    return f"""# 강남구 P2 대여소별 공간 형평성 분석
+
+## 결론
+
+- 동일 대여소: {experiment.stations}개, 요청 발생 대여소:
+  {default["stations_with_requests"]}개
+- P0 전체 성공률 {p0["service_rate"]:.2%}, 요청 10건 이상 대여소 p10
+  {p0["p10_station_service_rate"]:.2%}
+- 기존 P2: 순 실패 방지 {default["net_failures_avoided"]:,}건, 개선/동률/악화
+  {default["stations_improved"]}/{default["stations_tied"]}/{default["stations_worsened"]}개
+- 서비스 P2: 순 실패 방지 {service["net_failures_avoided"]:,}건, 개선/동률/악화
+  {service["stations_improved"]}/{service["stations_tied"]}/{service["stations_worsened"]}개
+- 기존 P2 상위 10개 수혜 집중도: {default["top_10_positive_concentration"]:.2%}
+- 서비스 P2 상위 10개 수혜 집중도: {service["top_10_positive_concentration"]:.2%}
+- 재배치 유출이 있으면서 악화된 대여소: 기존 P2
+  {default["relocation_out_and_worsened_stations"]}개, 서비스 P2
+  {service["relocation_out_and_worsened_stations"]}개
+
+전체 성공률만 보지 않고 악화 대여소와 하위 10% 서비스율을 함께 본다. 집중도는 각 정책의
+모든 양의 실패 감소 중 상위 10개 대여소가 차지한 비율이며 순개선 대비 비율이 아니다.
+
+## 실험 계약
+
+- 방법: `{experiment.method}`
+- 홀드아웃: `{experiment.evaluation_window}`
+- 매일 리셋하지 않는 5일 연속 재생
+- 동일 165개 대여소, 초기 재고, 관측 요청 순서
+- P0: 재배치 없음
+- 기존 P2: 시간당 직접 운송 2회, 15km/h, 적재 20대
+- 서비스 P2: 시간당 직접 운송 3회, 20km/h, 적재 10대
+- 개선·악화 기준: 같은 대여소 P0 대비 실패 건수 감소·증가
+- p10 대상: 요청이 10건 이상인 대여소
+
+## 정책별 형평성 요약
+
+| 정책 | 전체 성공률 | 대여소 p10 | P0 대비 p10 | 개선/동률/악화 | 순 방지 실패 | \
+악화지점 추가 실패 | 상위10 집중도 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+{summary_rows}
+
+## 실패 감소 상위 10개 대여소
+
+| 정책 | 대여소 | 요청 | 방지 실패 | 재배치 유입 | 재배치 유출 |
+|---|---|---:|---:|---:|---:|
+{top_rows}
+
+## 악화 대여소 상위 10개
+
+전체 악화 대여소 목록과 수치는 CSV·JSON에 보존했다.
+
+| 정책 | 대여소 | 요청 | 추가 실패 | 재배치 유입 | 재배치 유출 |
+|---|---|---:|---:|---:|---:|
+{harm_rows}
+
+## 불변조건
+
+- 세 정책의 대여소별 요청 수가 모두 같다.
+- 대여소별 실패 합은 정책 전체 실패와 같다.
+- 성공 + 실패 = 전체 요청이며 보존식 잔차는 0이다.
+- 정책별 판단 시점 작업 수와 이동 대수 한도를 지킨다.
+
+## 해석 제한
+
+{limitations}
+
+## 다음 단계
+
+1. 악화 대여소의 시간대별 재고·수요·재배치 유출 순서를 분해한다.
+2. 공급 대여소 보호 하한이나 악화 페널티가 있는 P3 후보를 설계한다.
+3. P3는 동일 홀드아웃에서 사후 선택하지 않고 별도 검증기간 계약을 먼저 고정한다.
+"""
+
+
 def _render_temporal_markdown(experiment: TemporalRobustnessExperiment) -> str:
     summary_rows = "\n".join(
         "| {label} | {day_type} | {days} | {requests:,} | {service:.2%} | "
@@ -2271,6 +2689,112 @@ P1은 이동을 즉시 완료하는 낙관적 상한이고, P2는 거리와 직�
 2. 차량 수·속도·적재량 민감도 분석으로 결과 범위를 제시한다.
 3. 관측되지 않은 잠재 수요를 낮음·기준·높음 시나리오로 확장한다.
 """
+
+
+def _plot_station_equity(
+    frame: pl.DataFrame,
+    runs: tuple[tuple[str, SimulationRun], ...],
+    path: Path,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    malgun_path = Path("C:/Windows/Fonts/malgun.ttf")
+    font_family = "DejaVu Sans"
+    if malgun_path.exists():
+        font_manager.fontManager.addfont(str(malgun_path))
+        font_family = font_manager.FontProperties(fname=str(malgun_path)).get_name()
+    with plt.rc_context({"font.family": font_family, "axes.unicode_minus": False}):
+        figure, axes = plt.subplots(2, 2, figsize=(15, 11))
+        for axis, (prefix, title) in zip(
+            axes[0],
+            (
+                ("default", "기존 P2: 대여소별 P0 대비 실패 감소"),
+                ("service", "서비스 P2: 대여소별 P0 대비 실패 감소"),
+            ),
+            strict=True,
+        ):
+            values = frame[f"{prefix}_failures_avoided_vs_p0"].to_list()
+            limit = max(max(abs(value) for value in values), 1)
+            scatter = axis.scatter(
+                frame["longitude"].to_list(),
+                frame["latitude"].to_list(),
+                c=values,
+                cmap="RdYlGn",
+                vmin=-limit,
+                vmax=limit,
+                s=[20 + math.sqrt(requests) * 2 for requests in frame["requests"].to_list()],
+                alpha=0.85,
+                edgecolors="#333333",
+                linewidths=0.2,
+            )
+            axis.set_title(title)
+            axis.set_xlabel("경도")
+            axis.set_ylabel("위도")
+            axis.grid(alpha=0.15)
+            colorbar = figure.colorbar(scatter, ax=axis, shrink=0.82)
+            colorbar.set_label("방지 실패(건, 음수는 악화)")
+
+        labels = [label for label, _ in runs]
+        overall = [run.metrics.service_rate * 100 for _, run in runs]
+        p10 = [run.metrics.p10_station_service_rate * 100 for _, run in runs]
+        worst = [run.metrics.worst_station_service_rate * 100 for _, run in runs]
+        x_values = list(range(len(labels)))
+        bar_width = 0.24
+        axes[1, 0].bar(
+            [value - bar_width for value in x_values],
+            overall,
+            width=bar_width,
+            label="전체",
+            color="#4c78a8",
+        )
+        axes[1, 0].bar(
+            x_values,
+            p10,
+            width=bar_width,
+            label="대여소 p10",
+            color="#f2cf5b",
+        )
+        axes[1, 0].bar(
+            [value + bar_width for value in x_values],
+            worst,
+            width=bar_width,
+            label="최저 대여소",
+            color="#e45756",
+        )
+        axes[1, 0].set_xticks(x_values, labels, rotation=8)
+        axes[1, 0].set_ylim(0, 100)
+        axes[1, 0].set_title("전체와 하위 대여소 서비스율")
+        axes[1, 0].set_ylabel("성공률(%)")
+        axes[1, 0].grid(axis="y", alpha=0.2)
+        axes[1, 0].legend()
+
+        active = frame.filter(pl.col("requests") > 0)
+        policy_labels = [runs[1][0], runs[2][0]]
+        improved = []
+        tied = []
+        worsened = []
+        for prefix in ("default", "service"):
+            values = active[f"{prefix}_failures_avoided_vs_p0"]
+            improved.append(int((values > 0).sum()))
+            tied.append(int((values == 0).sum()))
+            worsened.append(int((values < 0).sum()))
+        axes[1, 1].bar(policy_labels, improved, label="개선", color="#59a14f")
+        axes[1, 1].bar(policy_labels, tied, bottom=improved, label="동률", color="#bab0ac")
+        axes[1, 1].bar(
+            policy_labels,
+            worsened,
+            bottom=[good + same for good, same in zip(improved, tied, strict=True)],
+            label="악화",
+            color="#e15759",
+        )
+        axes[1, 1].set_title("요청 발생 대여소의 개선·동률·악화")
+        axes[1, 1].set_ylabel("대여소 수")
+        axes[1, 1].tick_params(axis="x", rotation=8)
+        axes[1, 1].grid(axis="y", alpha=0.2)
+        axes[1, 1].legend()
+        figure.suptitle("강남구 2025-11 홀드아웃: P2 공간 형평성")
+        figure.tight_layout()
+        figure.savefig(path, dpi=160)
+        plt.close(figure)
 
 
 def _plot_temporal_robustness(

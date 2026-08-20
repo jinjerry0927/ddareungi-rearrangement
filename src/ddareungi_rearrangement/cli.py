@@ -28,6 +28,7 @@ from ddareungi_rearrangement.simulation import (
     build_policy_comparison,
     build_spatial_policy_comparison,
     build_spatial_sensitivity,
+    build_station_equity,
     build_temporal_robustness,
     snapshot_actionable_coordinates,
 )
@@ -364,6 +365,47 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("reports/gangnam_2025_11_daily_robustness.md"),
     )
+    equity_parser = subparsers.add_parser(
+        "run-station-equity",
+        help="연속 홀드아웃에서 P2의 대여소별 개선·악화 집중도를 분석합니다.",
+    )
+    equity_parser.add_argument(
+        "--trips-file",
+        type=Path,
+        default=Path("data/processed/gangnam_2025_11_trips.parquet"),
+    )
+    equity_parser.add_argument(
+        "--station-hour-file",
+        type=Path,
+        default=Path("data/processed/gangnam_2025_11_station_hour.parquet"),
+    )
+    equity_parser.add_argument(
+        "--coordinate-file",
+        type=Path,
+        default=Path("data/sample/gangnam_station_coordinates_2026_08_20.csv"),
+    )
+    equity_parser.add_argument("--evaluation-start", default="2025-11-24")
+    equity_parser.add_argument("--evaluation-end", default="2025-11-29")
+    equity_parser.add_argument(
+        "--station-output",
+        type=Path,
+        default=Path("reports/data/gangnam_2025_11_station_equity.csv"),
+    )
+    equity_parser.add_argument(
+        "--figure-output",
+        type=Path,
+        default=Path("reports/figures/gangnam_2025_11_station_equity.png"),
+    )
+    equity_parser.add_argument(
+        "--json-output",
+        type=Path,
+        default=Path("reports/gangnam_2025_11_station_equity.json"),
+    )
+    equity_parser.add_argument(
+        "--markdown-output",
+        type=Path,
+        default=Path("reports/gangnam_2025_11_station_equity.md"),
+    )
     return parser
 
 
@@ -610,6 +652,40 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"{incremental['days_better_than_default']}/"
             f"{incremental['days_tied_with_default']}/"
             f"{incremental['days_worse_than_default']}"
+        )
+        print(f"Report: {args.markdown_output}")
+        return 0
+    if args.command == "run-station-equity":
+        try:
+            experiment = build_station_equity(
+                trips_path=args.trips_file,
+                station_hour_path=args.station_hour_file,
+                coordinate_path=args.coordinate_file,
+                evaluation_start=datetime.fromisoformat(args.evaluation_start),
+                evaluation_end=datetime.fromisoformat(args.evaluation_end),
+                station_csv_path=args.station_output,
+                figure_path=args.figure_output,
+                json_path=args.json_output,
+                markdown_path=args.markdown_output,
+            )
+        except (SimulationError, ValueError, OSError) as exc:
+            print(f"Station equity simulation failed: {exc}")
+            return 1
+
+        default = experiment.equity_summaries["greedy_default"]
+        service = experiment.equity_summaries["greedy_service"]
+        print(f"Station equity scope: {experiment.stations}")
+        print(
+            "P2 default improved/tied/worsened stations: "
+            f"{default['stations_improved']}/"
+            f"{default['stations_tied']}/"
+            f"{default['stations_worsened']}"
+        )
+        print(
+            "P2 service improved/tied/worsened stations: "
+            f"{service['stations_improved']}/"
+            f"{service['stations_tied']}/"
+            f"{service['stations_worsened']}"
         )
         print(f"Report: {args.markdown_output}")
         return 0
