@@ -1,0 +1,82 @@
+{
+  "audited_at_utc": "2026-08-19T07:08:48.595548+00:00",
+  "status": "PASS",
+  "total_rows": 2736,
+  "unique_station_ids": 2736,
+  "duplicate_station_ids": 0,
+  "observed_fields": [
+    "parkingBikeTotCnt",
+    "rackTotCnt",
+    "shared",
+    "stationId",
+    "stationLatitude",
+    "stationLongitude",
+    "stationName"
+  ],
+  "field_types": {
+    "parkingBikeTotCnt": [
+      "str"
+    ],
+    "rackTotCnt": [
+      "str"
+    ],
+    "shared": [
+      "str"
+    ],
+    "stationId": [
+      "str"
+    ],
+    "stationLatitude": [
+      "str"
+    ],
+    "stationLongitude": [
+      "str"
+    ],
+    "stationName": [
+      "str"
+    ]
+  },
+  "missing_values": {
+    "parkingBikeTotCnt": 0,
+    "rackTotCnt": 0,
+    "shared": 0,
+    "stationId": 0,
+    "stationLatitude": 0,
+    "stationLongitude": 0,
+    "stationName": 0
+  },
+  "invalid_numeric_values": {
+    "parkingBikeTotCnt": 0,
+    "rackTotCnt": 0,
+    "shared": 0,
+    "stationLatitude": 0,
+    "stationLongitude": 0
+  },
+  "negative_inventory_values": 0,
+  "zero_rack_count": 0,
+  "parking_over_rack_count": 1023,
+  "coordinates_outside_seoul_bounds": 0,
+  "pages": [
+    {
+      "requested_range": "1-1000",
+      "response_service_name": "rentBikeStatus",
+      "result_code": "INFO-000",
+      "reported_count": 1000,
+      "row_count": 1000
+    },
+    {
+      "requested_range": "1001-2000",
+      "response_service_name": "rentBikeStatus",
+      "result_code": "INFO-000",
+      "reported_count": 1000,
+      "row_count": 1000
+    },
+    {
+      "requested_range": "2001-3000",
+      "response_service_name": "rentBikeStatus",
+      "result_code": "INFO-000",
+      "reported_count": 736,
+      "row_count": 736
+    }
+  ]
+}

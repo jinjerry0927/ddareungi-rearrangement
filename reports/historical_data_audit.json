@@ -1,0 +1,701 @@
+{
+  "audited_at_utc": "2026-08-19T07:37:59.499382+00:00",
+  "status": "PASS_WITH_WARNINGS",
+  "analysis_ready": true,
+  "simulator_ready": false,
+  "selected_period": "2025-11",
+  "candidate_borough": "강남구",
+  "candidate_peak_hours": [
+    13,
+    10,
+    9
+  ],
+  "station": {
+    "source_file": "stations_2025_12.xlsx",
+    "sheet_name": "대여소현황",
+    "rows": 2799,
+    "unique_station_ids": 2799,
+    "duplicate_station_ids": 0,
+    "boroughs": 25,
+    "missing_station_ids": 0,
+    "missing_boroughs": 0,
+    "missing_nominal_racks": 0,
+    "lcd_station_rows": 1065,
+    "qr_station_rows": 1740,
+    "hybrid_station_rows": 6,
+    "nominal_racks_min": 2,
+    "nominal_racks_median": 10.0,
+    "nominal_racks_max": 62
+  },
+  "inventory": {
+    "source_file": "inventory_2025_q4.zip",
+    "encoding": "cp949",
+    "target_month": "2025-11",
+    "total_rows": 6152132,
+    "unique_station_ids": 2809,
+    "matched_station_ids": 2799,
+    "station_mapping_rate": 0.99644,
+    "zero_inventory_rows": 578629,
+    "inventory_over_nominal_racks_rows": 2516723,
+    "months": [
+      {
+        "member": "서울특별시_대여소별 공공자전거 대여가능 수량(1시간 단위)_2025년도_4분기/data_2510.csv",
+        "month": "2025-10",
+        "rows": 2071152,
+        "dates": 31,
+        "hours": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17,
+          18,
+          19,
+          20,
+          21,
+          22,
+          23
+        ],
+        "time_groups": 743,
+        "missing_time_groups": [
+          "2025-10-02/09"
+        ],
+        "station_time_coverage_rate": 0.99591,
+        "unique_station_ids": 2799,
+        "matched_station_ids": 2789,
+        "missing_values": 0,
+        "invalid_dates": 0,
+        "invalid_hours": 0,
+        "invalid_inventory_values": 0,
+        "negative_inventory_values": 0,
+        "duplicate_station_time_keys": 0,
+        "non_monotonic_time_groups": 0,
+        "zero_inventory_rows": 208113,
+        "matched_capacity_rows": 2064476,
+        "inventory_over_nominal_racks_rows": 828598
+      },
+      {
+        "member": "서울특별시_대여소별 공공자전거 대여가능 수량(1시간 단위)_2025년도_4분기/data_2511.csv",
+        "month": "2025-11",
+        "rows": 2004849,
+        "dates": 30,
+        "hours": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17,
+          18,
+          19,
+          20,
+          21,
+          22,
+          23
+        ],
+        "time_groups": 719,
+        "missing_time_groups": [
+          "2025-11-02/09"
+        ],
+        "station_time_coverage_rate": 0.995141,
+        "unique_station_ids": 2802,
+        "matched_station_ids": 2796,
+        "missing_values": 0,
+        "invalid_dates": 0,
+        "invalid_hours": 0,
+        "invalid_inventory_values": 0,
+        "negative_inventory_values": 0,
+        "duplicate_station_time_keys": 0,
+        "non_monotonic_time_groups": 0,
+        "zero_inventory_rows": 179411,
+        "matched_capacity_rows": 2001215,
+        "inventory_over_nominal_racks_rows": 835383
+      },
+      {
+        "member": "서울특별시_대여소별 공공자전거 대여가능 수량(1시간 단위)_2025년도_4분기/data_2512.csv",
+        "month": "2025-12",
+        "rows": 2076131,
+        "dates": 31,
+        "hours": [
+          0,
+          1,
+          2,
+          3,
+          4,
+          5,
+          6,
+          7,
+          8,
+          9,
+          10,
+          11,
+          12,
+          13,
+          14,
+          15,
+          16,
+          17,
+          18,
+          19,
+          20,
+          21,
+          22,
+          23
+        ],
+        "time_groups": 743,
+        "missing_time_groups": [
+          "2025-12-02/09"
+        ],
+        "station_time_coverage_rate": 0.998305,
+        "unique_station_ids": 2799,
+        "matched_station_ids": 2796,
+        "missing_values": 0,
+        "invalid_dates": 0,
+        "invalid_hours": 0,
+        "invalid_inventory_values": 0,
+        "negative_inventory_values": 0,
+        "duplicate_station_time_keys": 0,
+        "non_monotonic_time_groups": 0,
+        "zero_inventory_rows": 191105,
+        "matched_capacity_rows": 2075280,
+        "inventory_over_nominal_racks_rows": 852742
+      }
+    ],
+    "borough_ranking": [
+      {
+        "borough": "강남구",
+        "rows": 128299,
+        "unique_station_ids": 179,
+        "matched_capacity_rate": 1.0,
+        "zero_inventory_rows": 20313,
+        "zero_inventory_rate": 0.158325,
+        "inventory_over_nominal_racks_rows": 48182,
+        "over_nominal_racks_rate": 0.375545,
+        "peak_zero_hours": [
+          13,
+          10,
+          9
+        ]
+      },
+      {
+        "borough": "은평구",
+        "rows": 69024,
+        "unique_station_ids": 96,
+        "matched_capacity_rate": 1.0,
+        "zero_inventory_rows": 10481,
+        "zero_inventory_rate": 0.151846,
+        "inventory_over_nominal_racks_rows": 19236,
+        "over_nominal_racks_rate": 0.278686,
+        "peak_zero_hours": [
+          9,
+          8,
+          10
+        ]
+      },
+      {
+        "borough": "성북구",
+        "rows": 58186,
+        "unique_station_ids": 81,
+        "matched_capacity_rate": 1.0,
+        "zero_inventory_rows": 7315,
+        "zero_inventory_rate": 0.125718,
+        "inventory_over_nominal_racks_rows": 21331,
+        "over_nominal_racks_rate": 0.3666,
+        "peak_zero_hours": [
+          12,
+          13,
+          9
+        ]
+      },
+      {
+        "borough": "노원구",
+        "rows": 108400,
+        "unique_station_ids": 151,
+        "matched_capacity_rate": 1.0,
+        "zero_inventory_rows": 13460,
+        "zero_inventory_rate": 0.12417,
+        "inventory_over_nominal_racks_rows": 39788,
+        "over_nominal_racks_rate": 0.367048,
+        "peak_zero_hours": [
+          13,
+          12,
+          11
+        ]
+      },
+      {
+        "borough": "중구",
+        "rows": 65403,
+        "unique_station_ids": 92,
+        "matched_capacity_rate": 1.0,
+        "zero_inventory_rows": 8087,
+        "zero_inventory_rate": 0.123649,
+        "inventory_over_nominal_racks_rows": 16794,
+        "over_nominal_racks_rate": 0.256777,
+        "peak_zero_hours": [
+          6,
+          22,
+          20
+        ]
+      },
+      {
+        "borough": "강북구",
+        "rows": 40779,
+        "unique_station_ids": 57,
+        "matched_capacity_rate": 1.0,
+        "zero_inventory_rows": 4780,
+        "zero_inventory_rate": 0.117217,
+        "inventory_over_nominal_racks_rows": 10115,
+        "over_nominal_racks_rate": 0.248044,
+        "peak_zero_hours": [
+          13,
+          14,
+          12
+        ]
+      },
+      {
+        "borough": "서대문구",
+        "rows": 58896,
+        "unique_station_ids": 82,
+        "matched_capacity_rate": 1.0,
+        "zero_inventory_rows": 6901,
+        "zero_inventory_rate": 0.117173,
+        "inventory_over_nominal_racks_rows": 13229,
+        "over_nominal_racks_rate": 0.224616,
+        "peak_zero_hours": [
+          11,
+          12,
+          13
+        ]
+      },
+      {
+        "borough": "강동구",
+        "rows": 88437,
+        "unique_station_ids": 123,
+        "matched_capacity_rate": 1.0,
+        "zero_inventory_rows": 9486,
+        "zero_inventory_rate": 0.107263,
+        "inventory_over_nominal_racks_rows": 27347,
+        "over_nominal_racks_rate": 0.309226,
+        "peak_zero_hours": [
+          12,
+          13,
+          14
+        ]
+      },
+      {
+        "borough": "송파구",
+        "rows": 156264,
+        "unique_station_ids": 218,
+        "matched_capacity_rate": 1.0,
+        "zero_inventory_rows": 16133,
+        "zero_inventory_rate": 0.103242,
+        "inventory_over_nominal_racks_rows": 53700,
+        "over_nominal_racks_rate": 0.343649,
+        "peak_zero_hours": [
+          10,
+          12,
+          13
+        ]
+      },
+      {
+        "borough": "성동구",
+        "rows": 67575,
+        "unique_station_ids": 94,
+        "matched_capacity_rate": 1.0,
+        "zero_inventory_rows": 6524,
+        "zero_inventory_rate": 0.096545,
+        "inventory_over_nominal_racks_rows": 29729,
+        "over_nominal_racks_rate": 0.439941,
+        "peak_zero_hours": [
+          6,
+          22,
+          7
+        ]
+      },
+      {
+        "borough": "관악구",
+        "rows": 51049,
+        "unique_station_ids": 71,
+        "matched_capacity_rate": 1.0,
+        "zero_inventory_rows": 4831,
+        "zero_inventory_rate": 0.094635,
+        "inventory_over_nominal_racks_rows": 21837,
+        "over_nominal_racks_rate": 0.427765,
+        "peak_zero_hours": [
+          17,
+          14,
+          10
+        ]
+      },
+      {
+        "borough": "종로구",
+        "rows": 70865,
+        "unique_station_ids": 99,
+        "matched_capacity_rate": 1.0,
+        "zero_inventory_rows": 6366,
+        "zero_inventory_rate": 0.089833,
+        "inventory_over_nominal_racks_rows": 21767,
+        "over_nominal_racks_rate": 0.307162,
+        "peak_zero_hours": [
+          9,
+          10,
+          8
+        ]
+      },
+      {
+        "borough": "양천구",
+        "rows": 81189,
+        "unique_station_ids": 113,
+        "matched_capacity_rate": 1.0,
+        "zero_inventory_rows": 6461,
+        "zero_inventory_rate": 0.07958,
+        "inventory_over_nominal_racks_rows": 45975,
+        "over_nominal_racks_rate": 0.566271,
+        "peak_zero_hours": [
+          12,
+          10,
+          11
+        ]
+      },
+      {
+        "borough": "동작구",
+        "rows": 51160,
+        "unique_station_ids": 72,
+        "matched_capacity_rate": 1.0,
+        "zero_inventory_rows": 3795,
+        "zero_inventory_rate": 0.074179,
+        "inventory_over_nominal_racks_rows": 25136,
+        "over_nominal_racks_rate": 0.491321,
+        "peak_zero_hours": [
+          9,
+          14,
+          12
+        ]
+      },
+      {
+        "borough": "강서구",
+        "rows": 140383,
+        "unique_station_ids": 197,
+        "matched_capacity_rate": 1.0,
+        "zero_inventory_rows": 10279,
+        "zero_inventory_rate": 0.073221,
+        "inventory_over_nominal_racks_rows": 64529,
+        "over_nominal_racks_rate": 0.459664,
+        "peak_zero_hours": [
+          10,
+          9,
+          11
+        ]
+      },
+      {
+        "borough": "영등포구",
+        "rows": 126049,
+        "unique_station_ids": 177,
+        "matched_capacity_rate": 1.0,
+        "zero_inventory_rows": 8810,
+        "zero_inventory_rate": 0.069893,
+        "inventory_over_nominal_racks_rows": 72563,
+        "over_nominal_racks_rate": 0.575673,
+        "peak_zero_hours": [
+          22,
+          6,
+          9
+        ]
+      },
+      {
+        "borough": "광진구",
+        "rows": 63276,
+        "unique_station_ids": 89,
+        "matched_capacity_rate": 1.0,
+        "zero_inventory_rows": 4331,
+        "zero_inventory_rate": 0.068446,
+        "inventory_over_nominal_racks_rows": 25618,
+        "over_nominal_racks_rate": 0.404861,
+        "peak_zero_hours": [
+          10,
+          12,
+          11
+        ]
+      },
+      {
+        "borough": "마포구",
+        "rows": 86999,
+        "unique_station_ids": 121,
+        "matched_capacity_rate": 1.0,
+        "zero_inventory_rows": 5838,
+        "zero_inventory_rate": 0.067104,
+        "inventory_over_nominal_racks_rows": 36397,
+        "over_nominal_racks_rate": 0.418361,
+        "peak_zero_hours": [
+          6,
+          7,
+          8
+        ]
+      },
+      {
+        "borough": "도봉구",
+        "rows": 53925,
+        "unique_station_ids": 75,
+        "matched_capacity_rate": 1.0,
+        "zero_inventory_rows": 3481,
+        "zero_inventory_rate": 0.064553,
+        "inventory_over_nominal_racks_rows": 21205,
+        "over_nominal_racks_rate": 0.393231,
+        "peak_zero_hours": [
+          13,
+          12,
+          11
+        ]
+      },
+      {
+        "borough": "용산구",
+        "rows": 60890,
+        "unique_station_ids": 86,
+        "matched_capacity_rate": 1.0,
+        "zero_inventory_rows": 3818,
+        "zero_inventory_rate": 0.062703,
+        "inventory_over_nominal_racks_rows": 22923,
+        "over_nominal_racks_rate": 0.376466,
+        "peak_zero_hours": [
+          9,
+          10,
+          6
+        ]
+      },
+      {
+        "borough": "동대문구",
+        "rows": 63991,
+        "unique_station_ids": 89,
+        "matched_capacity_rate": 1.0,
+        "zero_inventory_rows": 3796,
+        "zero_inventory_rate": 0.059321,
+        "inventory_over_nominal_racks_rows": 29361,
+        "over_nominal_racks_rate": 0.45883,
+        "peak_zero_hours": [
+          8,
+          12,
+          11
+        ]
+      },
+      {
+        "borough": "서초구",
+        "rows": 107156,
+        "unique_station_ids": 150,
+        "matched_capacity_rate": 1.0,
+        "zero_inventory_rows": 5906,
+        "zero_inventory_rate": 0.055116,
+        "inventory_over_nominal_racks_rows": 46592,
+        "over_nominal_racks_rate": 0.434805,
+        "peak_zero_hours": [
+          22,
+          20,
+          10
+        ]
+      },
+      {
+        "borough": "금천구",
+        "rows": 52030,
+        "unique_station_ids": 74,
+        "matched_capacity_rate": 1.0,
+        "zero_inventory_rows": 2370,
+        "zero_inventory_rate": 0.045551,
+        "inventory_over_nominal_racks_rows": 37767,
+        "over_nominal_racks_rate": 0.72587,
+        "peak_zero_hours": [
+          13,
+          10,
+          12
+        ]
+      },
+      {
+        "borough": "중랑구",
+        "rows": 69024,
+        "unique_station_ids": 96,
+        "matched_capacity_rate": 1.0,
+        "zero_inventory_rows": 3038,
+        "zero_inventory_rate": 0.044014,
+        "inventory_over_nominal_racks_rows": 33656,
+        "over_nominal_racks_rate": 0.487599,
+        "peak_zero_hours": [
+          13,
+          14,
+          10
+        ]
+      },
+      {
+        "borough": "구로구",
+        "rows": 81966,
+        "unique_station_ids": 114,
+        "matched_capacity_rate": 1.0,
+        "zero_inventory_rows": 1918,
+        "zero_inventory_rate": 0.0234,
+        "inventory_over_nominal_racks_rows": 50606,
+        "over_nominal_racks_rate": 0.617402,
+        "peak_zero_hours": [
+          9,
+          12,
+          22
+        ]
+      }
+    ],
+    "candidate_borough": "강남구",
+    "candidate_peak_hours": [
+      13,
+      10,
+      9
+    ]
+  },
+  "rental": {
+    "query": "2025-11-05/13",
+    "response_service_names": [
+      "rentData"
+    ],
+    "result_codes": [
+      "INFO-000"
+    ],
+    "reported_count": 5600,
+    "received_rows": 5600,
+    "observed_fields": [
+      "BIKE_ID",
+      "BIKE_SE_CD",
+      "BIRTH_YEAR",
+      "END_INDEX",
+      "RENT_DT",
+      "RENT_HOLD",
+      "RENT_ID",
+      "RENT_NM",
+      "RENT_STATION_ID",
+      "RETURN_STATION_ID",
+      "RNUM",
+      "RTN_DT",
+      "RTN_HOLD",
+      "RTN_ID",
+      "RTN_NM",
+      "SEX_CD",
+      "START_INDEX",
+      "USE_DST",
+      "USE_MIN",
+      "USR_CLS_CD"
+    ],
+    "field_types": {
+      "BIKE_ID": [
+        "str"
+      ],
+      "BIKE_SE_CD": [
+        "str"
+      ],
+      "BIRTH_YEAR": [
+        "str"
+      ],
+      "END_INDEX": [
+        "int"
+      ],
+      "RENT_DT": [
+        "str"
+      ],
+      "RENT_HOLD": [
+        "str"
+      ],
+      "RENT_ID": [
+        "str"
+      ],
+      "RENT_NM": [
+        "str"
+      ],
+      "RENT_STATION_ID": [
+        "str"
+      ],
+      "RETURN_STATION_ID": [
+        "str"
+      ],
+      "RNUM": [
+        "str"
+      ],
+      "RTN_DT": [
+        "str"
+      ],
+      "RTN_HOLD": [
+        "str"
+      ],
+      "RTN_ID": [
+        "str"
+      ],
+      "RTN_NM": [
+        "str"
+      ],
+      "SEX_CD": [
+        "str"
+      ],
+      "START_INDEX": [
+        "int"
+      ],
+      "USE_DST": [
+        "str"
+      ],
+      "USE_MIN": [
+        "str"
+      ],
+      "USR_CLS_CD": [
+        "str"
+      ]
+    },
+    "missing_values": {
+      "RENT_DT": 0,
+      "RENT_ID": 0,
+      "RENT_NM": 0,
+      "RTN_DT": 0,
+      "RTN_ID": 26,
+      "RTN_NM": 26,
+      "USE_MIN": 0,
+      "USE_DST": 0,
+      "RENT_STATION_ID": 0,
+      "RETURN_STATION_ID": 26
+    },
+    "invalid_duration_values": 0,
+    "invalid_distance_values": 0,
+    "unique_rental_station_ids": 1891,
+    "unique_return_station_ids": 1905,
+    "rental_station_mapping_rate": 0.997885,
+    "return_station_mapping_rate": 0.998425,
+    "candidate_borough_rentals": 197,
+    "candidate_borough_returns": 213
+  },
+  "warnings": [
+    "요청 서비스명은 tbCycleRentData지만 실제 응답 루트는 rentData로 관측됐다.",
+    "대여이력 표본의 필수 필드에 결측 78건이 있어 정제 시 별도 제외 또는 상태 분류가 필요하다.",
+    "과거 대여 가능 수량이 공식 거치대 수를 초과한 행이 있어 거치대 수를 하드 용량으로 사용할 수 없다.",
+    "시간별 재고 스냅샷이 누락된 시각: 2025-10-02/09, 2025-11-02/09, 2025-12-02/09",
+    "2025년 12월 말 대여소 메타데이터를 2025년 4분기 전체에 대조했으므로 분기 중 신설·폐쇄 시차가 있을 수 있다.",
+    "BIKE_ID·BIRTH_YEAR·USR_CLS_CD는 재배치 분석에 불필요하므로 정제 데이터에서 제외한다."
+  ],
+  "source_urls": {
+    "station_metadata": "https://data.seoul.go.kr/dataList/OA-13252/F/1/datasetView.do",
+    "hourly_inventory": "https://data.seoul.go.kr/dataList/OA-22382/F/1/datasetView.do",
+    "rental_history": "https://data.seoul.go.kr/dataList/OA-15182/A/1/datasetView.do"
+  }
+}

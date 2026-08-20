@@ -1,0 +1,45 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ddareungi-rearrangement"
+version = "0.1.0"
+description = "서울시 따릉이 재배치 정책을 검증하는 데이터 분석 및 시뮬레이션 프로젝트"
+readme = "README.md"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+  "duckdb>=1.1",
+  "fastexcel>=0.12",
+  "httpx>=0.27",
+  "matplotlib>=3.9",
+  "polars>=1.0",
+  "pyarrow>=17.0",
+  "python-dotenv>=1.0",
+]
+
+[project.scripts]
+ddareungi = "ddareungi_rearrangement.cli:main"
+
+[dependency-groups]
+dev = [
+  "ipykernel>=6.29",
+  "jupyterlab>=4.2",
+  "pytest>=8.3",
+  "ruff>=0.9",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ddareungi_rearrangement"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

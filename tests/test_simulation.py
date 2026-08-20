@@ -1,0 +1,110 @@
+from datetime import datetime
+
+import polars as pl
+
+from ddareungi_rearrangement.simulation import (
+    NoRelocationPolicy,
+    SimulationConfig,
+    StaticThresholdPolicy,
+    build_replay_scenario,
+    simulate_replay,
+)
+
+
+def _station_hour(start: datetime, bikes_a: int, bikes_b: int) -> pl.DataFrame:
+    return pl.DataFrame(
+        {
+            "timestamp": [start, start],
+            "station_id": ["A", "B"],
+            "station_name": ["에이", "비"],
+            "available_bikes": [bikes_a, bikes_b],
+            "inventory_observed": [True, True],
+            "actionable": [True, True],
+        }
+    )
+
+
+def test_failed_rental_suppresses_return_and_unconditional_inbound_still_arrives() -> None:
+    start = datetime(2025, 11, 24)
+    end = datetime(2025, 11, 24, 1)
+    trips = pl.DataFrame(
+        {
+            "rent_at": [
+                datetime(2025, 11, 24, 0, 10),
+                datetime(2025, 11, 23, 23, 50),
+                datetime(2025, 11, 24, 0, 30),
+            ],
+            "return_at": [
+                datetime(2025, 11, 24, 0, 20),
+                datetime(2025, 11, 24, 0, 15),
+                datetime(2025, 11, 24, 0, 40),
+            ],
+            "rent_station_id": ["A", "OUT", "A"],
+            "return_station_id": ["B", "A", "B"],
+        }
+    )
+    scenario = build_replay_scenario(
+        trips,
+        _station_hour(start, bikes_a=0, bikes_b=2),
+        SimulationConfig(start=start, end=end),
+    )
+
+    run = simulate_replay(scenario, NoRelocationPolicy())
+
+    assert run.metrics.observed_requests == 2
+    assert run.metrics.successful_rentals == 1
+    assert run.metrics.failed_rentals == 1
+    assert run.metrics.unconditional_inbound_returns == 1
+    assert run.metrics.successful_internal_returns == 1
+    assert run.metrics.final_station_bikes == 3
+    assert run.metrics.empty_station_minutes == 45
+    assert run.metrics.conservation_residual == 0
+
+
+def test_static_threshold_policy_respects_epoch_budget() -> None:
+    policy = StaticThresholdPolicy(
+        lower_threshold=2,
+        target_bikes=5,
+        upper_threshold=8,
+    )
+
+    transfers = policy.plan({"A": 0, "B": 10, "C": 12}, max_bikes=3)
+
+    assert sum(transfer.bike_count for transfer in transfers) == 3
+    assert transfers[0].from_station_id == "C"
+    assert transfers[0].to_station_id == "A"
+
+
+def test_threshold_relocation_preserves_bikes_and_can_prevent_failure() -> None:
+    start = datetime(2025, 11, 24)
+    end = datetime(2025, 11, 24, 1)
+    trips = pl.DataFrame(
+        {
+            "rent_at": [datetime(2025, 11, 24, 0, 10)],
+            "return_at": [datetime(2025, 11, 24, 0, 30)],
+            "rent_station_id": ["A"],
+            "return_station_id": ["OUT"],
+        }
+    )
+    scenario = build_replay_scenario(
+        trips,
+        _station_hour(start, bikes_a=0, bikes_b=10),
+        SimulationConfig(start=start, end=end, max_bikes_per_decision=3),
+    )
+
+    baseline = simulate_replay(scenario, NoRelocationPolicy())
+    threshold = simulate_replay(
+        scenario,
+        StaticThresholdPolicy(
+            lower_threshold=2,
+            target_bikes=5,
+            upper_threshold=8,
+        ),
+    )
+
+    assert baseline.metrics.failed_rentals == 1
+    assert threshold.metrics.failed_rentals == 0
+    assert threshold.metrics.bikes_moved == 3
+    assert threshold.metrics.max_bikes_moved_in_epoch == 3
+    assert threshold.metrics.conservation_residual == 0
+    assert threshold.metrics.observed_requests == baseline.metrics.observed_requests

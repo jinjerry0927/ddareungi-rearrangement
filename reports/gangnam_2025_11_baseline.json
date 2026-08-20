@@ -1,0 +1,162 @@
+{
+  "generated_at_utc": "2026-08-19T12:24:10.456196+00:00",
+  "borough": "강남구",
+  "month": "2025-11",
+  "stations": 179,
+  "active_stations": 170,
+  "actionable_stations": 167,
+  "no_activity_station_ids": [
+    "2314",
+    "2316",
+    "2322",
+    "2323",
+    "2355",
+    "2421",
+    "3603",
+    "3621",
+    "4901"
+  ],
+  "station_hours": 128880,
+  "inventory_observed_hours": 128299,
+  "inventory_coverage_rate": 0.995492,
+  "raw_empty_station_hours": 20313,
+  "raw_empty_station_hour_rate": 0.158325,
+  "active_inventory_observed_hours": 121828,
+  "empty_station_hours": 13842,
+  "empty_station_hour_rate": 0.113619,
+  "over_nominal_station_hours": 48182,
+  "over_nominal_rate": 0.375545,
+  "scoped_trips": 137463,
+  "internal_trips": 77918,
+  "outbound_trips": 31589,
+  "inbound_trips": 27956,
+  "unresolved_return_trips": 0,
+  "rental_events": 109507,
+  "return_events": 105856,
+  "return_events_outside_month": 18,
+  "peak_empty_hour": 13,
+  "peak_empty_hour_rate": 0.13040912667191187,
+  "busiest_rental_hour": 18,
+  "busiest_return_hour": 18,
+  "highest_shortage_station_id": "3620",
+  "highest_shortage_station_name": "청담역 11번 출구",
+  "highest_shortage_rate": 0.7204450625869263,
+  "largest_net_outflow_station": "3642. LH강남힐스테이트아파트",
+  "largest_net_outflow": -499,
+  "largest_net_inflow_station": "2335. 3호선 매봉역 3번출구앞",
+  "largest_net_inflow": 335,
+  "top_shortage_stations": [
+    {
+      "station_id": "3620",
+      "station_name": "청담역 11번 출구",
+      "empty_rate": 0.7204450625869263,
+      "rentals": 95,
+      "returns": 47,
+      "net_flow": -48
+    },
+    {
+      "station_id": "2349",
+      "station_name": "역삼빌딩 앞(하나은행 옆)",
+      "empty_rate": 0.6342141863699583,
+      "rentals": 303,
+      "returns": 203,
+      "net_flow": -100
+    },
+    {
+      "station_id": "4936",
+      "station_name": "SK텔레콤(T1) 인근",
+      "empty_rate": 0.588317107093185,
+      "rentals": 138,
+      "returns": 98,
+      "net_flow": -40
+    },
+    {
+      "station_id": "4916",
+      "station_name": "청담역 1번출구",
+      "empty_rate": 0.564673157162726,
+      "rentals": 121,
+      "returns": 108,
+      "net_flow": -13
+    },
+    {
+      "station_id": "2430",
+      "station_name": "강남파이낸스센터앞(역삼역2번출구)",
+      "empty_rate": 0.5479833101529903,
+      "rentals": 545,
+      "returns": 427,
+      "net_flow": -118
+    },
+    {
+      "station_id": "4915",
+      "station_name": "영동중앙교회 버스정류장",
+      "empty_rate": 0.5201668984700973,
+      "rentals": 214,
+      "returns": 217,
+      "net_flow": 3
+    },
+    {
+      "station_id": "2329",
+      "station_name": "르네상스호텔사거리 역삼지하보도 2번출구",
+      "empty_rate": 0.5076495132127955,
+      "rentals": 248,
+      "returns": 249,
+      "net_flow": 1
+    },
+    {
+      "station_id": "2386",
+      "station_name": "크린랩 본사",
+      "empty_rate": 0.4575799721835883,
+      "rentals": 187,
+      "returns": 130,
+      "net_flow": -57
+    },
+    {
+      "station_id": "2398",
+      "station_name": "더라움",
+      "empty_rate": 0.4506258692628651,
+      "rentals": 272,
+      "returns": 209,
+      "net_flow": -63
+    },
+    {
+      "station_id": "3646",
+      "station_name": "선정릉역 4번 출구",
+      "empty_rate": 0.41863699582753827,
+      "rentals": 329,
+      "returns": 314,
+      "net_flow": -15
+    }
+  ],
+  "trip_extraction": {
+    "source_member": "서울특별시 공공자전거 대여이력 정보_2511.csv",
+    "source_rows": 3186968,
+    "scoped_rows": 137463,
+    "flow_counts": {
+      "inbound": 27956,
+      "internal": 77918,
+      "outbound": 31589
+    },
+    "invalid_rent_datetimes": 0,
+    "missing_return_datetimes": 0,
+    "invalid_duration_values": 0,
+    "invalid_distance_values": 0,
+    "output_file": "data\\processed\\gangnam_2025_11_trips.parquet"
+  },
+  "inventory_extraction": {
+    "source_member": "서울특별시_대여소별 공공자전거 대여가능 수량(1시간 단위)_2025년도_4분기/data_2511.csv",
+    "source_rows": 2004849,
+    "scoped_rows": 128299,
+    "unique_station_ids": 179,
+    "invalid_rows": 0,
+    "output_file": "data\\processed\\gangnam_2025_11_inventory.parquet"
+  },
+  "output_files": {
+    "trips": "data\\processed\\gangnam_2025_11_trips.parquet",
+    "inventory": "data\\processed\\gangnam_2025_11_inventory.parquet",
+    "station_hour": "data\\processed\\gangnam_2025_11_station_hour.parquet",
+    "hourly_profile": "reports\\data\\gangnam_2025_11_hourly_profile.csv",
+    "station_ranking": "reports\\data\\gangnam_2025_11_station_ranking.csv",
+    "hourly_figure": "reports\\figures\\gangnam_2025_11_hourly_profile.png",
+    "station_figure": "reports\\figures\\gangnam_2025_11_station_ranking.png"
+  }
+}
