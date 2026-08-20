@@ -1,6 +1,6 @@
 # 프로젝트 상태
 
-- 단계: M7 P2 요청 단위 악화·구제 추적
+- 단계: M8 P3 donor reserve 학습기간 Pareto 분석
 - 상태: 완료
 - 기준일: 2026-08-20
 
@@ -81,16 +81,26 @@
 - 가장 최근 유출 후 악화까지 중앙시간은 854.3분·697.9분으로 즉시 인과 가설을 지지하지 않음
 - 순악화 대여소에서 발생한 악화 요청은 기존 P2 94건, 서비스 P2 48건
 - 요청 단위 악화 CSV·JSON·Markdown·전환/경과시간 PNG 생성
+- `GreedyNearestPolicy`에 기존 reserve 5 동작을 보존하는 공급지 보유 하한 옵션 추가
+- 11월 3~21일 165개 대여소·75,428건에서 reserve 5·6·7·8 학습 비교
+- P0 학습 기준 실패 11,547건, 성공률 84.69% 확인
+- reserve 5/6/7/8의 실패는 7,193/7,449/7,545/8,016건
+- reserve 5/6/7/8의 악화 요청은 2,143/1,963/1,743/1,413건
+- reserve 5/6/7/8의 대여소 p10은 78.06/76.53/76.57/71.09%
+- reserve 증가에 따라 이동 대수는 5,405→4,798→4,272→3,337대로 감소
+- 전체 실패 최소·악화 요청 최소·p10 최대 Pareto에서 네 후보 모두 비지배임을 확인
+- 가중점수 없이 단일 후보를 선택할 수 없어 홀드아웃 실행 전 사용자 결정 지점으로 중단
+- donor reserve 학습 CSV·JSON·Markdown·Pareto PNG 생성
 
 ## 현재 목표
 
-학습기간에서 donor reserve 5·6·7·8대가 총 실패·악화 요청·p10에 미치는 Pareto 관계를 비교한다.
+donor reserve 후보 중 홀드아웃에 한 번 적용할 값을 결정한다.
 
 ## 다음 작업
 
-1. 수신 목표 5대와 별개인 공급지 보유 하한 `donor_reserve_bikes`를 추가한다.
-2. 11월 3~21일 학습기간에서 reserve 5·6·7·8대를 같은 서비스 P2 운영능력으로 비교한다.
-3. 총 실패·악화 요청·p10·거리·이동 대수의 Pareto 지배를 계산하고 선택이 남으면 중단한다.
+1. 사용자가 서비스 우선 5, 균형 후보 7, 악화 최소 8 중 운영 우선값을 확인한다.
+2. 선택값과 평가 지표를 고정한 뒤 11월 24~28일 홀드아웃을 한 번만 실행한다.
+3. P2 reserve 5 대비 전체 실패·악화 요청·p10·거리·이동량을 함께 판정한다.
 
 ## 현재 데이터 리스크
 
@@ -115,6 +125,8 @@
 - 서비스 P2는 같은 홀드아웃 민감도에서 선택돼 공간 형평성 결과도 독립 검증이 아니다.
 - 선행 유출 연결률은 높지만 중앙 경과가 11시간 이상이라 즉시 유출 인과로 해석할 수 없다.
 - 악화 요청은 순악화 지점뿐 아니라 전체로는 개선된 대여소에서도 발생한다.
+- donor reserve 네 후보가 모두 비지배라 운영 가치 없이는 데이터만으로 단일값을 고를 수 없다.
+- reserve 7은 reserve 5 대비 악화 400건 감소와 실패 352건 증가의 절충이나 자동 최적은 아니다.
 - 자세한 결과: `reports/live_api_schema.md`
 - 과거 데이터 상세 결과: `reports/historical_data_audit.md`
 - 강남구 기준선 결과: `reports/gangnam_2025_11_baseline.md`
@@ -124,6 +136,7 @@
 - P2 날짜별 시간적 강건성 결과: `reports/gangnam_2025_11_daily_robustness.md`
 - P2 대여소별 공간 형평성 결과: `reports/gangnam_2025_11_station_equity.md`
 - P2 요청 단위 악화·구제 추적 결과: `reports/gangnam_2025_11_harm_trace.md`
+- P3 donor reserve 학습 Pareto 결과: `reports/gangnam_2025_11_donor_reserve_training.md`
 
 ## 최근 검증
 
@@ -133,7 +146,7 @@
 
 - Ruff lint: PASS
 - Ruff format: PASS
-- pytest: 22 passed
+- pytest: 24 passed
 - 프로젝트 환경 진단: PASS
 - API 키: 설정 확인, 값은 출력·보고서·Git에서 제외
 - 과거 데이터 감사: PASS_WITH_WARNINGS
@@ -146,6 +159,7 @@
 - P2 30일 시간적 강건성 분석: PASS
 - P2 165개 대여소 공간 형평성 분석: PASS
 - P2 요청 단위 악화·구제 trace 분석: PASS
+- P3 donor reserve 학습 Pareto 분석: PASS, 운영값 결정 대기
 
 ## 중단 규칙
 

@@ -142,6 +142,7 @@ class GreedyNearestPolicy:
     coordinates: dict[str, tuple[float, float]]
     lower_threshold: int = 2
     target_bikes: int = 5
+    donor_reserve_bikes: int | None = None
     upper_threshold: int = 8
     max_actions_per_decision: int = 2
     vehicle_capacity: int = 20
@@ -153,6 +154,9 @@ class GreedyNearestPolicy:
     def __post_init__(self) -> None:
         if not 0 <= self.lower_threshold < self.target_bikes < self.upper_threshold:
             raise ValueError("재고 임계값은 0 <= 하한 < 목표 < 상한이어야 합니다")
+        donor_reserve = self.donor_reserve_bikes or self.target_bikes
+        if not self.target_bikes <= donor_reserve <= self.upper_threshold:
+            raise ValueError("공급지 보유 하한은 목표 이상, 상한 이하여야 합니다")
         if self.max_actions_per_decision <= 0 or self.vehicle_capacity <= 0:
             raise ValueError("작업 수와 차량 용량은 양수여야 합니다")
         if self.average_speed_kmh <= 0 or self.road_distance_factor < 1:
@@ -177,8 +181,9 @@ class GreedyNearestPolicy:
             ),
             key=lambda item: (-int(item[1]), str(item[0])),
         )
+        donor_reserve = self.donor_reserve_bikes or self.target_bikes
         donor_surplus = {
-            station_id: bikes - self.target_bikes
+            station_id: bikes - donor_reserve
             for station_id, bikes in inventory.items()
             if bikes > self.upper_threshold
         }
@@ -411,6 +416,22 @@ class HarmTraceExperiment:
     policy_runs: tuple[dict[str, Any], ...]
     transition_summaries: dict[str, dict[str, Any]]
     harm_requests: tuple[dict[str, Any], ...]
+    limitations: tuple[str, ...]
+    output_files: dict[str, str]
+
+
+@dataclass(frozen=True)
+class DonorReserveExperiment:
+    generated_at_utc: str
+    method: str
+    training_window: str
+    stations: int
+    reserves: tuple[int, ...]
+    baseline: dict[str, Any]
+    candidates: tuple[dict[str, Any], ...]
+    pareto_reserves: tuple[int, ...]
+    selection_status: str
+    selected_reserve: int | None
     limitations: tuple[str, ...]
     output_files: dict[str, str]
 
@@ -2254,6 +2275,323 @@ def _summarize_station_equity(
     return summaries
 
 
+def _count_request_transitions(
+    baseline_run: SimulationRun,
+    policy_run: SimulationRun,
+) -> tuple[int, int]:
+    if baseline_run.event_trace is None or policy_run.event_trace is None:
+        raise SimulationError("요청 전환 계산에는 trace 실행이 필요합니다")
+    baseline = baseline_run.event_trace.filter(pl.col("event_kind") == "rental").select(
+        "trip_id",
+        pl.col("timestamp").alias("baseline_timestamp"),
+        pl.col("station_id").alias("baseline_station_id"),
+        pl.col("rental_outcome").alias("baseline_outcome"),
+    )
+    policy = policy_run.event_trace.filter(pl.col("event_kind") == "rental").select(
+        "trip_id",
+        pl.col("timestamp").alias("policy_timestamp"),
+        pl.col("station_id").alias("policy_station_id"),
+        pl.col("rental_outcome").alias("policy_outcome"),
+    )
+    transitions = baseline.join(policy, on="trip_id", how="inner", validate="1:1")
+    if transitions.height != baseline.height:
+        raise SimulationError("후보 정책 요청 trace 행 수가 P0와 다릅니다")
+    if not (
+        (transitions["baseline_timestamp"] == transitions["policy_timestamp"]).all()
+        and (transitions["baseline_station_id"] == transitions["policy_station_id"]).all()
+    ):
+        raise SimulationError("후보 정책 요청 trace 키가 P0와 다릅니다")
+    rescued = transitions.filter(
+        (pl.col("baseline_outcome") == "failed") & (pl.col("policy_outcome") == "successful")
+    ).height
+    harmed = transitions.filter(
+        (pl.col("baseline_outcome") == "successful") & (pl.col("policy_outcome") == "failed")
+    ).height
+    return rescued, harmed
+
+
+def run_donor_reserve_training(
+    scenario: ReplayScenario,
+    coordinates: dict[str, tuple[float, float]],
+    *,
+    reserves: tuple[int, ...] = (5, 6, 7, 8),
+) -> tuple[pl.DataFrame, SimulationRun, tuple[SimulationRun, ...]]:
+    if not reserves or len(set(reserves)) != len(reserves):
+        raise ValueError("donor reserve 후보는 중복 없는 하나 이상의 값이어야 합니다")
+    if any(not 5 <= reserve <= 8 for reserve in reserves):
+        raise ValueError("donor reserve 후보는 목표 5 이상, 상한 8 이하여야 합니다")
+    if set(scenario.initial_inventory) != set(coordinates):
+        raise SimulationError("donor reserve 시나리오와 좌표 대여소 범위가 다릅니다")
+    baseline_run = simulate_replay(scenario, NoRelocationPolicy(), collect_trace=True)
+    candidate_runs: list[SimulationRun] = []
+    records: list[dict[str, Any]] = []
+    baseline_station_failures = baseline_run.station_metrics.select(
+        "station_id", pl.col("failed_rentals").alias("baseline_failed")
+    )
+    for reserve in reserves:
+        run = simulate_replay(
+            scenario,
+            GreedyNearestPolicy(
+                coordinates=coordinates,
+                donor_reserve_bikes=reserve,
+                max_actions_per_decision=3,
+                vehicle_capacity=10,
+                average_speed_kmh=20.0,
+                name=f"greedy_service_reserve_{reserve}",
+            ),
+            collect_trace=True,
+        )
+        candidate_runs.append(run)
+        rescued, harmed = _count_request_transitions(baseline_run, run)
+        net_failures_avoided = baseline_run.metrics.failed_rentals - run.metrics.failed_rentals
+        if rescued - harmed != net_failures_avoided:
+            raise SimulationError(f"reserve {reserve}의 rescue-harm 재조정이 맞지 않습니다")
+        station_effects = baseline_station_failures.join(
+            run.station_metrics.select(
+                "station_id", pl.col("failed_rentals").alias("policy_failed")
+            ),
+            on="station_id",
+            how="inner",
+            validate="1:1",
+        ).with_columns(
+            (pl.col("baseline_failed") - pl.col("policy_failed")).alias("failures_avoided")
+        )
+        active_station_ids = set(
+            baseline_run.station_metrics.filter(pl.col("requests") > 0)["station_id"].to_list()
+        )
+        active_effects = station_effects.filter(pl.col("station_id").is_in(active_station_ids))
+        improvements = active_effects["failures_avoided"]
+        records.append(
+            {
+                "donor_reserve_bikes": reserve,
+                **asdict(run.metrics),
+                "rescued_requests_vs_p0": rescued,
+                "harmed_requests_vs_p0": harmed,
+                "net_failures_avoided_vs_p0": net_failures_avoided,
+                "transition_reconciliation_residual": rescued - harmed - net_failures_avoided,
+                "stations_improved_vs_p0": int((improvements > 0).sum()),
+                "stations_tied_vs_p0": int((improvements == 0).sum()),
+                "stations_worsened_vs_p0": int((improvements < 0).sum()),
+                "failures_added_at_worsened_stations": int(
+                    -active_effects.filter(pl.col("failures_avoided") < 0)["failures_avoided"].sum()
+                ),
+            }
+        )
+    frame = _annotate_reserve_pareto(pl.DataFrame(records).sort("donor_reserve_bikes"))
+    return frame, baseline_run, tuple(candidate_runs)
+
+
+def _annotate_reserve_pareto(frame: pl.DataFrame) -> pl.DataFrame:
+    rows = frame.to_dicts()
+    annotated: list[dict[str, Any]] = []
+    for candidate in rows:
+        dominated_by = []
+        for other in rows:
+            if other["donor_reserve_bikes"] == candidate["donor_reserve_bikes"]:
+                continue
+            no_worse = (
+                other["failed_rentals"] <= candidate["failed_rentals"]
+                and other["harmed_requests_vs_p0"] <= candidate["harmed_requests_vs_p0"]
+                and other["p10_station_service_rate"] >= candidate["p10_station_service_rate"]
+            )
+            strictly_better = (
+                other["failed_rentals"] < candidate["failed_rentals"]
+                or other["harmed_requests_vs_p0"] < candidate["harmed_requests_vs_p0"]
+                or other["p10_station_service_rate"] > candidate["p10_station_service_rate"]
+            )
+            if no_worse and strictly_better:
+                dominated_by.append(int(other["donor_reserve_bikes"]))
+        annotated.append(
+            {
+                **candidate,
+                "is_pareto": not dominated_by,
+                "dominated_by_reserves": ",".join(map(str, dominated_by)),
+            }
+        )
+    return pl.DataFrame(annotated).sort("donor_reserve_bikes")
+
+
+def build_donor_reserve_training(
+    *,
+    trips_path: Path,
+    station_hour_path: Path,
+    coordinate_path: Path,
+    training_start: datetime,
+    training_end: datetime,
+    reserves: tuple[int, ...],
+    comparison_csv_path: Path,
+    figure_path: Path,
+    json_path: Path,
+    markdown_path: Path,
+) -> DonorReserveExperiment:
+    try:
+        trips = pl.read_parquet(trips_path)
+        station_hour = pl.read_parquet(station_hour_path)
+        coordinate_frame = pl.read_csv(
+            coordinate_path,
+            schema_overrides={"station_id": pl.String},
+        )
+    except (OSError, pl.exceptions.PolarsError) as exc:
+        raise SimulationError(f"donor reserve 학습 입력을 읽지 못했습니다: {exc}") from exc
+    required_coordinate_columns = {"station_id", "latitude", "longitude"}
+    missing_columns = required_coordinate_columns - set(coordinate_frame.columns)
+    if missing_columns:
+        raise SimulationError(f"좌표 필수 열 누락: {sorted(missing_columns)}")
+    if coordinate_frame["station_id"].n_unique() != coordinate_frame.height:
+        raise SimulationError("좌표 대여소 ID가 중복됐습니다")
+    coordinates = {
+        str(row["station_id"]): (float(row["latitude"]), float(row["longitude"]))
+        for row in coordinate_frame.iter_rows(named=True)
+    }
+    scenario = build_replay_scenario(
+        trips,
+        station_hour,
+        SimulationConfig(
+            start=training_start,
+            end=training_end,
+            decision_interval_minutes=60,
+            max_bikes_per_decision=40,
+        ),
+        eligible_station_ids=set(coordinates),
+    )
+    frame, baseline_run, candidate_runs = run_donor_reserve_training(
+        scenario,
+        coordinates,
+        reserves=reserves,
+    )
+    pareto_reserves = tuple(
+        int(value) for value in frame.filter(pl.col("is_pareto"))["donor_reserve_bikes"]
+    )
+    selected_reserve = pareto_reserves[0] if len(pareto_reserves) == 1 else None
+    selection_status = (
+        "unique_pareto_candidate" if selected_reserve is not None else "tradeoff_requires_decision"
+    )
+    comparison_csv_path.parent.mkdir(parents=True, exist_ok=True)
+    frame.write_csv(comparison_csv_path)
+    _plot_donor_reserve_training(frame, figure_path)
+    output_files = {
+        "reserve_comparison": str(comparison_csv_path),
+        "reserve_figure": str(figure_path),
+        "json_report": str(json_path),
+        "markdown_report": str(markdown_path),
+    }
+    experiment = DonorReserveExperiment(
+        generated_at_utc=datetime.now(UTC).isoformat(),
+        method="training_only_donor_reserve_pareto_comparison",
+        training_window=f"{training_start.isoformat()} <= t < {training_end.isoformat()}",
+        stations=len(coordinates),
+        reserves=reserves,
+        baseline=asdict(baseline_run.metrics),
+        candidates=tuple(frame.to_dicts()),
+        pareto_reserves=pareto_reserves,
+        selection_status=selection_status,
+        selected_reserve=selected_reserve,
+        limitations=(
+            "학습기간 결과이며 홀드아웃 성능을 아직 확인하지 않았다.",
+            "Pareto 판정은 전체 실패·악화 요청·p10만 사용하고 운영비를 포함하지 않는다.",
+            "비지배 후보가 여러 개면 가치 가중치 없이는 단일 최적안을 선택할 수 없다.",
+            "P0와 후보 모두 공개 이력의 성공 요청만 재생해 미관측 잠재 수요를 제외한다.",
+            "서비스 P2의 시간당 3회·20km/h 운영능력 자체는 기존 홀드아웃 민감도에서 정했다.",
+        ),
+        output_files=output_files,
+    )
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    markdown_path.parent.mkdir(parents=True, exist_ok=True)
+    json_path.write_text(
+        json.dumps(asdict(experiment), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    markdown_path.write_text(
+        _render_donor_reserve_markdown(experiment),
+        encoding="utf-8",
+    )
+    return experiment
+
+
+def _render_donor_reserve_markdown(experiment: DonorReserveExperiment) -> str:
+    rows = "\n".join(
+        "| {reserve} | {service:.2%} | {failed:,} | {rescued:,} | {harmed:,} | "
+        "{p10:.2%} | {worsened} | {moved:,} | {distance:,.1f} | {pareto} | "
+        "{dominated_by} |".format(
+            reserve=row["donor_reserve_bikes"],
+            service=row["service_rate"],
+            failed=row["failed_rentals"],
+            rescued=row["rescued_requests_vs_p0"],
+            harmed=row["harmed_requests_vs_p0"],
+            p10=row["p10_station_service_rate"],
+            worsened=row["stations_worsened_vs_p0"],
+            moved=row["bikes_moved"],
+            distance=row["relocation_distance_km"],
+            pareto="예" if row["is_pareto"] else "아니오",
+            dominated_by=row["dominated_by_reserves"] or "-",
+        )
+        for row in experiment.candidates
+    )
+    if experiment.selected_reserve is None:
+        decision = (
+            f"비지배 후보 {list(experiment.pareto_reserves)}가 남아 단일 reserve를 자동 선택하지 "
+            "않는다. 총 실패, 악화 요청, 하위 대여소 서비스 중 무엇을 우선할지 "
+            "운영 결정이 필요하다."
+        )
+    else:
+        decision = (
+            f"reserve {experiment.selected_reserve}이(가) 세 핵심 축에서 유일한 비지배 후보다. "
+            "다음 단계에서 이 값만 홀드아웃에 적용할 수 있다."
+        )
+    limitations = "\n".join(f"- {item}" for item in experiment.limitations)
+    return f"""# 강남구 P3 donor reserve 학습기간 Pareto 분석
+
+## 결론
+
+- 학습기간 P0 요청: {experiment.baseline["observed_requests"]:,}건, 실패
+  {experiment.baseline["failed_rentals"]:,}건, 성공률 {experiment.baseline["service_rate"]:.2%}
+- 비교 reserve: {list(experiment.reserves)}대
+- 비지배 reserve: {list(experiment.pareto_reserves)}대
+- 선택 상태: `{experiment.selection_status}`
+
+{decision}
+
+Pareto 축은 `전체 실패 최소`, `P0 성공→후보 실패인 악화 요청 최소`, `요청 10건 이상
+대여소 p10 성공률 최대`다. 거리·이동량·악화 대여소 수는 공개하지만 지배 판정에는 넣지 않았다.
+
+## 실험 계약
+
+- 방법: `{experiment.method}`
+- 학습기간: `{experiment.training_window}`
+- 동일 대여소: {experiment.stations}개
+- 수신 임계값: 하한 2, 목표 5, 상한 8
+- 운영능력: 시간당 직접 운송 3회, 20km/h, 적재 10대
+- donor reserve: 공급 대여소에서 재배치 후 남기는 최소 재고
+- P0 trace는 한 번만 실행하고 모든 후보를 같은 trip ID와 비교
+- 홀드아웃 2025-11-24~28은 이 단계에서 실행하지 않음
+
+## 후보 결과
+
+| reserve | 성공률 | 실패 | 구제 | 악화 | p10 | 악화 대여소 | 이동 대수 | 거리(km) | \
+Pareto | 지배 후보 |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---|
+{rows}
+
+## 불변조건
+
+- 모든 후보는 같은 초기 재고, 대여소, 요청 순서와 운영능력을 쓴다.
+- 구제 요청 - 악화 요청 = P0 대비 순 실패 방지다.
+- 성공 + 실패 = 전체 요청이며 보존식 잔차는 0이다.
+- reserve가 높을수록 공급 대여소에서 한 번에 반출 가능한 재고는 증가하지 않는다.
+- 기존 reserve 5는 옵션 추가 전 P2 동작과 동일하다.
+
+## 해석 제한
+
+{limitations}
+
+## 다음 단계
+
+1. 유일한 비지배 후보면 값과 평가 계약을 고정하고 홀드아웃을 한 번만 실행한다.
+2. 비지배 후보가 여러 개면 사용자가 우선할 운영 가치나 허용 한도를 결정한다.
+3. 선택 후에도 전체 실패·악화 요청·p10·거리·이동량을 모두 함께 보고한다.
+"""
+
+
 def run_request_transition_trace(
     scenario: ReplayScenario,
     coordinates: dict[str, tuple[float, float]],
@@ -3240,6 +3578,69 @@ P1은 이동을 즉시 완료하는 낙관적 상한이고, P2는 거리와 직�
 2. 차량 수·속도·적재량 민감도 분석으로 결과 범위를 제시한다.
 3. 관측되지 않은 잠재 수요를 낮음·기준·높음 시나리오로 확장한다.
 """
+
+
+def _plot_donor_reserve_training(frame: pl.DataFrame, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    reserves = frame["donor_reserve_bikes"].to_list()
+    pareto = frame["is_pareto"].to_list()
+    malgun_path = Path("C:/Windows/Fonts/malgun.ttf")
+    font_family = "DejaVu Sans"
+    if malgun_path.exists():
+        font_manager.fontManager.addfont(str(malgun_path))
+        font_family = font_manager.FontProperties(fname=str(malgun_path)).get_name()
+    with plt.rc_context({"font.family": font_family, "axes.unicode_minus": False}):
+        figure, axes = plt.subplots(2, 2, figsize=(14, 9.5))
+        panels = (
+            ("failed_rentals", "학습기간 전체 실패", "실패(건)", "#4e79a7"),
+            ("harmed_requests_vs_p0", "P0 성공→후보 실패", "악화 요청(건)", "#e15759"),
+            (
+                "p10_station_service_rate",
+                "하위 10% 대여소 성공률",
+                "성공률",
+                "#59a14f",
+            ),
+            ("relocation_distance_km", "재배치 거리", "km", "#f28e2b"),
+        )
+        for axis, (column, title, ylabel, color) in zip(axes.flat, panels, strict=True):
+            values = frame[column].to_list()
+            display_values = (
+                [value * 100 for value in values]
+                if column == "p10_station_service_rate"
+                else values
+            )
+            axis.plot(reserves, display_values, marker="o", linewidth=2, color=color)
+            for reserve, value, is_pareto in zip(reserves, display_values, pareto, strict=True):
+                if is_pareto:
+                    axis.scatter(
+                        [reserve],
+                        [value],
+                        s=150,
+                        facecolors="none",
+                        edgecolors="#7b2cbf",
+                        linewidths=2.5,
+                        label="Pareto"
+                        if "Pareto" not in axis.get_legend_handles_labels()[1]
+                        else None,
+                    )
+                axis.annotate(
+                    f"{value:,.1f}",
+                    (reserve, value),
+                    textcoords="offset points",
+                    xytext=(0, 8),
+                    ha="center",
+                )
+            axis.set_title(title)
+            axis.set_xlabel("donor reserve(대)")
+            axis.set_ylabel("성공률(%)" if column == "p10_station_service_rate" else ylabel)
+            axis.set_xticks(reserves)
+            axis.grid(alpha=0.2)
+            if any(pareto):
+                axis.legend()
+        figure.suptitle("강남구 학습기간: P3 donor reserve Pareto 비교")
+        figure.tight_layout()
+        figure.savefig(path, dpi=160)
+        plt.close(figure)
 
 
 def _plot_harm_trace(

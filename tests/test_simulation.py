@@ -11,6 +11,7 @@ from ddareungi_rearrangement.simulation import (
     StaticThresholdPolicy,
     build_replay_scenario,
     run_daily_policy_comparison,
+    run_donor_reserve_training,
     run_request_transition_trace,
     run_spatial_sensitivity,
     run_station_equity_comparison,
@@ -177,6 +178,27 @@ def test_greedy_nearest_chooses_closest_donor_and_limits_actions() -> None:
     assert transfers[0].bike_count == 3
     assert transfers[0].distance_km > 0
     assert transfers[0].travel_minutes > 0
+
+
+def test_greedy_nearest_donor_reserve_limits_supply_without_changing_default() -> None:
+    coordinates = {"R": (37.5, 127.0), "D": (37.5, 127.01)}
+    default_policy = GreedyNearestPolicy(
+        coordinates=coordinates,
+        max_actions_per_decision=1,
+        vehicle_capacity=10,
+    )
+    protected_policy = GreedyNearestPolicy(
+        coordinates=coordinates,
+        donor_reserve_bikes=8,
+        max_actions_per_decision=1,
+        vehicle_capacity=10,
+    )
+
+    default_transfer = default_policy.plan({"R": 0, "D": 10}, max_bikes=40)
+    protected_transfer = protected_policy.plan({"R": 0, "D": 10}, max_bikes=40)
+
+    assert default_transfer[0].bike_count == 5
+    assert protected_transfer[0].bike_count == 2
 
 
 def test_delayed_relocation_arrival_changes_request_outcome_and_preserves_bikes() -> None:
@@ -385,3 +407,39 @@ def test_harm_trace_links_p0_success_p2_failure_to_prior_donor_outflow() -> None
     assert summaries["greedy_default"]["reconciliation_residual"] == 0
     assert all(run.event_trace is not None for _, run in runs)
     assert all(run.metrics.conservation_residual == 0 for _, run in runs)
+
+
+def test_donor_reserve_training_marks_dominated_candidate_without_weighted_score() -> None:
+    start = datetime(2025, 11, 24)
+    end = datetime(2025, 11, 24, 1)
+    trips = pl.DataFrame(
+        {
+            "rent_at": [datetime(2025, 11, 24, 0, minute) for minute in range(5, 11)],
+            "return_at": [datetime(2025, 11, 24, 0, minute) for minute in range(30, 36)],
+            "rent_station_id": ["A"] * 6,
+            "return_station_id": ["OUT"] * 6,
+        }
+    )
+    scenario = build_replay_scenario(
+        trips,
+        _station_hour(start, bikes_a=10, bikes_b=0),
+        SimulationConfig(start=start, end=end, max_bikes_per_decision=40),
+    )
+
+    frame, baseline, runs = run_donor_reserve_training(
+        scenario,
+        {"A": (37.5, 127.0), "B": (37.5, 127.001)},
+        reserves=(5, 8),
+    )
+
+    reserve_five = frame.filter(pl.col("donor_reserve_bikes") == 5).row(0, named=True)
+    reserve_eight = frame.filter(pl.col("donor_reserve_bikes") == 8).row(0, named=True)
+    assert baseline.metrics.failed_rentals == 0
+    assert reserve_five["failed_rentals"] == 1
+    assert reserve_five["harmed_requests_vs_p0"] == 1
+    assert not reserve_five["is_pareto"]
+    assert reserve_five["dominated_by_reserves"] == "8"
+    assert reserve_eight["failed_rentals"] == 0
+    assert reserve_eight["harmed_requests_vs_p0"] == 0
+    assert reserve_eight["is_pareto"]
+    assert all(run.metrics.conservation_residual == 0 for run in runs)

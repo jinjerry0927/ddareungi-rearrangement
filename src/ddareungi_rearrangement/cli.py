@@ -25,6 +25,7 @@ from ddareungi_rearrangement.pilot_analysis import (
 from ddareungi_rearrangement.seoul_api import SeoulOpenDataClient, SeoulOpenDataError
 from ddareungi_rearrangement.simulation import (
     SimulationError,
+    build_donor_reserve_training,
     build_harm_trace,
     build_policy_comparison,
     build_spatial_policy_comparison,
@@ -448,6 +449,53 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("reports/gangnam_2025_11_harm_trace.md"),
     )
+    reserve_parser = subparsers.add_parser(
+        "run-donor-reserve-training",
+        help="학습기간에서 공급지 보유 하한 후보의 Pareto 관계를 비교합니다.",
+    )
+    reserve_parser.add_argument(
+        "--trips-file",
+        type=Path,
+        default=Path("data/processed/gangnam_2025_11_trips.parquet"),
+    )
+    reserve_parser.add_argument(
+        "--station-hour-file",
+        type=Path,
+        default=Path("data/processed/gangnam_2025_11_station_hour.parquet"),
+    )
+    reserve_parser.add_argument(
+        "--coordinate-file",
+        type=Path,
+        default=Path("data/sample/gangnam_station_coordinates_2026_08_20.csv"),
+    )
+    reserve_parser.add_argument("--training-start", default="2025-11-03")
+    reserve_parser.add_argument("--training-end", default="2025-11-22")
+    reserve_parser.add_argument(
+        "--reserves",
+        type=int,
+        nargs="+",
+        default=[5, 6, 7, 8],
+    )
+    reserve_parser.add_argument(
+        "--comparison-output",
+        type=Path,
+        default=Path("reports/data/gangnam_2025_11_donor_reserve_training.csv"),
+    )
+    reserve_parser.add_argument(
+        "--figure-output",
+        type=Path,
+        default=Path("reports/figures/gangnam_2025_11_donor_reserve_training.png"),
+    )
+    reserve_parser.add_argument(
+        "--json-output",
+        type=Path,
+        default=Path("reports/gangnam_2025_11_donor_reserve_training.json"),
+    )
+    reserve_parser.add_argument(
+        "--markdown-output",
+        type=Path,
+        default=Path("reports/gangnam_2025_11_donor_reserve_training.md"),
+    )
     return parser
 
 
@@ -762,6 +810,28 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"{service['harmed_requests']}/"
             f"{service['net_failures_avoided']}"
         )
+        print(f"Report: {args.markdown_output}")
+        return 0
+    if args.command == "run-donor-reserve-training":
+        try:
+            experiment = build_donor_reserve_training(
+                trips_path=args.trips_file,
+                station_hour_path=args.station_hour_file,
+                coordinate_path=args.coordinate_file,
+                training_start=datetime.fromisoformat(args.training_start),
+                training_end=datetime.fromisoformat(args.training_end),
+                reserves=tuple(args.reserves),
+                comparison_csv_path=args.comparison_output,
+                figure_path=args.figure_output,
+                json_path=args.json_output,
+                markdown_path=args.markdown_output,
+            )
+        except (SimulationError, ValueError, OSError) as exc:
+            print(f"Donor reserve training failed: {exc}")
+            return 1
+
+        print(f"Pareto donor reserves: {list(experiment.pareto_reserves)}")
+        print(f"Selection status: {experiment.selection_status}")
         print(f"Report: {args.markdown_output}")
         return 0
     if args.command == "run-simulation":
