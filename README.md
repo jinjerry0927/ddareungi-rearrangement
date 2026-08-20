@@ -35,6 +35,24 @@ P2-R은 P2보다 전체 실패가 30건 늘고 p10이 1.286%p 낮아졌습니다
 상세 결과는 [단일 홀드아웃 보고서](reports/gangnam_2025_11_donor_reserve_holdout.md)에서
 확인할 수 있습니다.
 
+### 차량 접근을 넣으면 얼마나 달라지는가
+
+기존 P2-R은 차량이 각 공급지에서 즉시 출발하는 낙관 참조입니다. 차량 1·2·3대가 합성
+greedy-medoids 거점에서 출발하고 배송 완료 위치를 이어 쓰도록 바꾸면 다음 범위가 나옵니다.
+
+| 실행모델 | 성공률 | 실패 | P0 대비 실패 방지 | 총거리 | 공차 접근 비중 | 차량부족 미실행 |
+|---|---:|---:|---:|---:|---:|---:|
+| 즉시출발 P2-R | 95.74% | 691건 | 1,214건 | 359.2km | 0.0% | 0건 |
+| 합성 fleet 1 | 91.98% | 1,299건 | 606건 | 496.5km | 79.6% | 240건 |
+| 합성 fleet 2 | 93.94% | 982건 | 923건 | 994.9km | 76.6% | 120건 |
+| 합성 fleet 3 | 95.37% | 751건 | 1,154건 | 1,477.0km | 76.3% | 0건 |
+
+fleet 3도 즉시출발보다 실패가 60건 늘고 총거리는 4.11배입니다. fleet 수가 늘수록 서비스는
+회복되지만 이동거리도 증가합니다. 실제 차량 수·차고지 자료가 없으므로 3대를 정답으로 고르지
+않고 **실행 현실성에 따른 성능 범위**로만 해석합니다.
+
+![P2-R fleet 실행모델 민감도](reports/figures/gangnam_2025_11_fleet_sensitivity.png)
+
 ## 데이터와 실험 범위
 
 - 서울 전체 2025년 11월 대여이력 3,186,968행을 스트리밍 처리
@@ -65,6 +83,7 @@ flowchart LR
 - 시간당 작업 수, 차량 적재량, 이동 대수 상한 적용
 - 요청별 구제·악화 trace와 대여소별 개선·악화 분포 산출
 - 사용자 이동 중·재배치 중 자전거까지 포함한 보존식 검증
+- 선택적 fleet 실행에서 차량 접근·픽업 시점 재고·busy 상태·연속 배송 위치 반영
 
 주요 구현은 [simulation.py](src/ddareungi_rearrangement/simulation.py), 실행 인터페이스는
 [cli.py](src/ddareungi_rearrangement/cli.py), 회귀 테스트는
@@ -84,6 +103,7 @@ flowchart LR
 | 요청 피해 | P0 성공에서 정책 실패로 바뀐 요청과 선행 유출 추적 | [요청 trace](reports/gangnam_2025_11_harm_trace.md) |
 | 공급지 보호 학습 | reserve 5·6·7·8의 비가중 Pareto 비교 | [reserve 학습](reports/gangnam_2025_11_donor_reserve_training.md) |
 | 공급지 보호 검증 | 동결한 reserve 7과 기존 reserve 5의 단일 홀드아웃 | [reserve 홀드아웃](reports/gangnam_2025_11_donor_reserve_holdout.md) |
+| 차량 실행 민감도 | 즉시출발과 합성 fleet 1·2·3의 서비스·공차거리 범위 | [fleet 민감도](reports/gangnam_2025_11_fleet_sensitivity.md) |
 
 기존 결과 파일은 보호형 정책을 P3라고 표기했지만, 초기 계획의 `Forecast + min-cost flow`
 P3와 충돌해 이후 명칭을 `P2-R`로 정리했습니다. 자세한 경계는
@@ -140,6 +160,7 @@ uv run ddareungi run-station-equity
 uv run ddareungi run-harm-trace
 uv run ddareungi run-donor-reserve-training
 uv run ddareungi run-donor-reserve-holdout
+uv run ddareungi run-fleet-sensitivity
 ```
 
 전체 코드 품질·회귀 테스트·환경 진단은 한 번에 실행할 수 있습니다.
@@ -148,7 +169,7 @@ uv run ddareungi run-donor-reserve-holdout
 .\scripts\verify.ps1
 ```
 
-현재 검증 기준은 Ruff lint·format, pytest **25개**, Python·필수 디렉터리·API 키 설정 확인
+현재 검증 기준은 Ruff lint·format, pytest **30개**, Python·필수 디렉터리·API 키 설정 확인
 통과입니다. 분석 명령은 기본 경로 대신 각 입력·출력 경로를 CLI 옵션으로 바꿀 수 있습니다.
 
 ## 해석할 때 지켜야 할 한계
@@ -156,7 +177,8 @@ uv run ddareungi run-donor-reserve-holdout
 - 공개 대여이력에는 성공한 요청만 있어, 품절 때문에 시도하지 못한 잠재 수요는 빠져 있습니다.
 - 공식 거치대 수보다 재고가 많은 관측이 빈번해 만차·반납 실패는 아직 모델링하지 않습니다.
 - 좌표는 현재 API 스냅샷이라 2025년 운영 당시 위치와 다를 수 있습니다.
-- 차량은 공급 대여소에서 바로 출발하며 첫 접근 이동·연속 경로·실제 교통은 미반영입니다.
+- 핵심 P2-R 결과는 공급지 즉시출발이며, fleet 민감도만 합성 접근·연속 위치를 반영합니다.
+- fleet 수·초기 거점은 공식 운영정보가 아니며 실제 교통·차고지·교대는 미반영입니다.
 - 일별 비교는 실제 자정 재고로 매일 초기화해 월 연속 무재배치와 계약이 다릅니다.
 - 서비스 P2 운영능력과 형평성도 같은 5일 홀드아웃에서 분석돼 완전히 독립된 검증이 아닙니다.
 - 대여소별 서비스율은 운영 형평성 대리변수이며 인구·소득·교통약자를 직접 나타내지 않습니다.

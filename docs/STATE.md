@@ -144,10 +144,12 @@
 - 다섯 시나리오의 요청 trace 재조정·자전거 보존식 잔차 0과 거리 분해 일치 확인
 - 같은 홀드아웃 재사용을 `post_hoc_execution_model_sensitivity`로 명시하고 fleet 자동 선택 금지
 - fleet 민감도 CSV·JSON·Markdown·PNG 생성 및 2240×1520 렌더링 확인
+- README에 즉시출발·fleet 1·2·3 서비스·총거리·공차 비중 결과표와 차트 반영
+- README 로컬 링크 22개, CLI 명령 13개, fleet 시나리오 5개 성공률 일치 확인
 
 ## 현재 목표
 
-합성 fleet 1·2·3의 서비스·요청 피해·공차거리 범위를 실데이터에서 산출했다.
+fleet 실행 현실성 범위를 README 포트폴리오 첫 화면과 재현 절차까지 동기화했다.
 
 ## 다음 작업
 
