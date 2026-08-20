@@ -14,6 +14,7 @@ from ddareungi_rearrangement.simulation import (
     run_daily_policy_comparison,
     run_donor_reserve_holdout,
     run_donor_reserve_training,
+    run_fleet_sensitivity,
     run_request_transition_trace,
     run_spatial_sensitivity,
     run_station_equity_comparison,
@@ -745,3 +746,47 @@ def test_fleet_next_approach_starts_from_previous_delivery_station() -> None:
     assert vehicle["status_at_end"] == "idle"
     assert run.metrics.failed_rentals == 0
     assert run.metrics.conservation_residual == 0
+
+
+def test_fleet_sensitivity_uses_shared_requests_and_reconciles_all_scenarios() -> None:
+    start = datetime(2025, 11, 24)
+    end = datetime(2025, 11, 24, 1)
+    trips = pl.DataFrame(
+        {
+            "rent_at": [datetime(2025, 11, 24, 0, minute) for minute in range(5, 11)],
+            "return_at": [datetime(2025, 11, 24, 0, minute) for minute in range(30, 36)],
+            "rent_station_id": ["A"] * 6,
+            "return_station_id": ["OUT"] * 6,
+        }
+    )
+    scenario = build_replay_scenario(
+        trips,
+        _station_hour(start, bikes_a=10, bikes_b=0),
+        SimulationConfig(start=start, end=end, max_bikes_per_decision=40),
+    )
+
+    frame, runs = run_fleet_sensitivity(
+        scenario,
+        {"A": (37.5, 127.0), "B": (37.5, 127.001)},
+        fleet_sizes=(1, 2),
+    )
+
+    assert frame["scenario_id"].to_list() == [
+        "p0_no_relocation",
+        "p2r_instant_at_donor",
+        "p2r_fleet_1",
+        "p2r_fleet_2",
+    ]
+    assert frame["observed_requests"].unique().to_list() == [6]
+    assert frame["conservation_residual"].unique().to_list() == [0]
+    assert frame["transition_reconciliation_residual"].unique().to_list() == [0]
+    fleet_rows = frame.filter(pl.col("execution_model") == "persistent_fleet")
+    assert fleet_rows["fleet_size"].to_list() == [1, 2]
+    assert (
+        fleet_rows["total_vehicle_distance_km"]
+        == (fleet_rows["approach_distance_km"] + fleet_rows["loaded_distance_km"]).round(3)
+    ).all()
+    assert (
+        (fleet_rows["fleet_utilization_rate"] >= 0) & (fleet_rows["fleet_utilization_rate"] <= 1)
+    ).all()
+    assert all(run.event_trace is not None for _, run in runs)

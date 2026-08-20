@@ -27,6 +27,7 @@ from ddareungi_rearrangement.simulation import (
     SimulationError,
     build_donor_reserve_holdout,
     build_donor_reserve_training,
+    build_fleet_sensitivity,
     build_harm_trace,
     build_policy_comparison,
     build_spatial_policy_comparison,
@@ -539,6 +540,53 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("reports/gangnam_2025_11_donor_reserve_holdout.md"),
     )
+    fleet_parser = subparsers.add_parser(
+        "run-fleet-sensitivity",
+        help="P2-R의 즉시출발과 영속 fleet 1~3대 실행 범위를 비교합니다.",
+    )
+    fleet_parser.add_argument(
+        "--trips-file",
+        type=Path,
+        default=Path("data/processed/gangnam_2025_11_trips.parquet"),
+    )
+    fleet_parser.add_argument(
+        "--station-hour-file",
+        type=Path,
+        default=Path("data/processed/gangnam_2025_11_station_hour.parquet"),
+    )
+    fleet_parser.add_argument(
+        "--coordinate-file",
+        type=Path,
+        default=Path("data/sample/gangnam_station_coordinates_2026_08_20.csv"),
+    )
+    fleet_parser.add_argument("--evaluation-start", default="2025-11-24")
+    fleet_parser.add_argument("--evaluation-end", default="2025-11-29")
+    fleet_parser.add_argument(
+        "--fleet-sizes",
+        type=int,
+        nargs="+",
+        default=[1, 2, 3],
+    )
+    fleet_parser.add_argument(
+        "--comparison-output",
+        type=Path,
+        default=Path("reports/data/gangnam_2025_11_fleet_sensitivity.csv"),
+    )
+    fleet_parser.add_argument(
+        "--figure-output",
+        type=Path,
+        default=Path("reports/figures/gangnam_2025_11_fleet_sensitivity.png"),
+    )
+    fleet_parser.add_argument(
+        "--json-output",
+        type=Path,
+        default=Path("reports/gangnam_2025_11_fleet_sensitivity.json"),
+    )
+    fleet_parser.add_argument(
+        "--markdown-output",
+        type=Path,
+        default=Path("reports/gangnam_2025_11_fleet_sensitivity.md"),
+    )
     return parser
 
 
@@ -904,6 +952,37 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"{comparison['harmed_requests_change']:+}/"
             f"{comparison['p10_service_rate_pp_change']:+.3f}"
         )
+        print(f"Report: {args.markdown_output}")
+        return 0
+    if args.command == "run-fleet-sensitivity":
+        try:
+            experiment = build_fleet_sensitivity(
+                trips_path=args.trips_file,
+                station_hour_path=args.station_hour_file,
+                coordinate_path=args.coordinate_file,
+                evaluation_start=datetime.fromisoformat(args.evaluation_start),
+                evaluation_end=datetime.fromisoformat(args.evaluation_end),
+                fleet_sizes=tuple(args.fleet_sizes),
+                comparison_csv_path=args.comparison_output,
+                figure_path=args.figure_output,
+                json_path=args.json_output,
+                markdown_path=args.markdown_output,
+            )
+        except (SimulationError, ValueError, OSError) as exc:
+            print(f"Fleet sensitivity failed: {exc}")
+            return 1
+
+        print(
+            f"Fleet sensitivity: {experiment.stations} stations, "
+            f"{experiment.observed_requests} requests"
+        )
+        for comparison in experiment.fleet_vs_instant:
+            print(
+                f"F{comparison['fleet_size']} failed/distance/utilization: "
+                f"{comparison['failed_rentals_change']:+}/"
+                f"{comparison['total_distance_km_change']:+.1f}km/"
+                f"{comparison['fleet_utilization_rate']:.1%}"
+            )
         print(f"Report: {args.markdown_output}")
         return 0
     if args.command == "run-simulation":

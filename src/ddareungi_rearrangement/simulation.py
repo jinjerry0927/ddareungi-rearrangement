@@ -570,6 +570,21 @@ class DonorReserveHoldoutExperiment:
     output_files: dict[str, str]
 
 
+@dataclass(frozen=True)
+class FleetSensitivityExperiment:
+    generated_at_utc: str
+    method: str
+    evaluation_window: str
+    stations: int
+    observed_requests: int
+    policy: dict[str, Any]
+    scenario_runs: tuple[dict[str, Any], ...]
+    fleet_vs_instant: tuple[dict[str, Any], ...]
+    vehicle_summaries: dict[str, tuple[dict[str, Any], ...]]
+    limitations: tuple[str, ...]
+    output_files: dict[str, str]
+
+
 DEFAULT_CANDIDATES = (
     ThresholdCandidate("conservative", 1, 4, 8),
     ThresholdCandidate("balanced", 2, 5, 8),
@@ -3401,6 +3416,451 @@ def _render_donor_reserve_holdout_markdown(
 """
 
 
+def run_fleet_sensitivity(
+    scenario: ReplayScenario,
+    coordinates: dict[str, tuple[float, float]],
+    *,
+    fleet_sizes: tuple[int, ...] = (1, 2, 3),
+) -> tuple[pl.DataFrame, tuple[tuple[str, SimulationRun], ...]]:
+    if not fleet_sizes or len(set(fleet_sizes)) != len(fleet_sizes):
+        raise ValueError("fleet 후보는 중복 없는 하나 이상의 값이어야 합니다")
+    if any(not 1 <= fleet_size <= 3 for fleet_size in fleet_sizes):
+        raise ValueError("fleet 후보는 프로젝트 계약 범위인 1~3대여야 합니다")
+    if set(scenario.initial_inventory) != set(coordinates):
+        raise SimulationError("fleet 민감도 시나리오와 좌표 대여소 범위가 다릅니다")
+
+    def protected_policy(name: str) -> GreedyNearestPolicy:
+        return GreedyNearestPolicy(
+            coordinates=coordinates,
+            donor_reserve_bikes=7,
+            max_actions_per_decision=3,
+            vehicle_capacity=10,
+            average_speed_kmh=20.0,
+            road_distance_factor=1.3,
+            handling_minutes_per_bike=0.75,
+            name=name,
+        )
+
+    runs: list[tuple[str, SimulationRun]] = [
+        (
+            "p0_no_relocation",
+            simulate_replay(scenario, NoRelocationPolicy(), collect_trace=True),
+        ),
+        (
+            "p2r_instant_at_donor",
+            simulate_replay(
+                scenario,
+                protected_policy("p2r_instant_at_donor"),
+                collect_trace=True,
+            ),
+        ),
+    ]
+    for fleet_size in fleet_sizes:
+        scenario_id = f"p2r_fleet_{fleet_size}"
+        runs.append(
+            (
+                scenario_id,
+                simulate_replay(
+                    scenario,
+                    protected_policy(scenario_id),
+                    collect_trace=True,
+                    fleet_config=FleetExecutionConfig(
+                        coordinates=coordinates,
+                        fleet_size=fleet_size,
+                        donor_reserve_bikes=7,
+                        vehicle_capacity=10,
+                        average_speed_kmh=20.0,
+                        road_distance_factor=1.3,
+                        handling_minutes_per_bike=0.75,
+                    ),
+                ),
+            )
+        )
+    baseline_run = runs[0][1]
+    baseline_failures = baseline_run.station_metrics.select(
+        "station_id", pl.col("failed_rentals").alias("baseline_failed")
+    )
+    active_station_ids = set(
+        baseline_run.station_metrics.filter(pl.col("requests") > 0)["station_id"].to_list()
+    )
+    records: list[dict[str, Any]] = []
+    for scenario_id, run in runs:
+        if run.metrics.observed_requests != baseline_run.metrics.observed_requests:
+            raise SimulationError(f"{scenario_id} 요청 수가 P0와 다릅니다")
+        if run.metrics.conservation_residual != 0:
+            raise SimulationError(f"{scenario_id} 자전거 보존식 잔차가 0이 아닙니다")
+        rescued, harmed = (
+            (0, 0)
+            if scenario_id == "p0_no_relocation"
+            else _count_request_transitions(baseline_run, run)
+        )
+        net_failures_avoided = baseline_run.metrics.failed_rentals - run.metrics.failed_rentals
+        if rescued - harmed != net_failures_avoided:
+            raise SimulationError(f"{scenario_id} rescue-harm 재조정이 맞지 않습니다")
+        station_effects = baseline_failures.join(
+            run.station_metrics.select(
+                "station_id", pl.col("failed_rentals").alias("policy_failed")
+            ),
+            on="station_id",
+            how="inner",
+            validate="1:1",
+        ).with_columns(
+            (pl.col("baseline_failed") - pl.col("policy_failed")).alias("failures_avoided")
+        )
+        active_effects = station_effects.filter(pl.col("station_id").is_in(active_station_ids))
+        improvements = active_effects["failures_avoided"]
+        fleet_metrics = run.fleet_metrics
+        if fleet_metrics is not None:
+            if fleet_metrics.total_vehicle_distance_km != round(
+                fleet_metrics.approach_distance_km + fleet_metrics.loaded_distance_km,
+                3,
+            ):
+                raise SimulationError(f"{scenario_id} fleet 거리 분해가 맞지 않습니다")
+            if not 0 <= fleet_metrics.utilization_rate <= 1:
+                raise SimulationError(f"{scenario_id} 차량 가동률이 0~1 범위를 벗어났습니다")
+            if fleet_metrics.picked_up_bikes != run.metrics.bikes_moved:
+                raise SimulationError(f"{scenario_id} fleet 픽업 대수와 이동 대수가 다릅니다")
+            fleet_fields = {
+                "fleet_size": fleet_metrics.fleet_size,
+                "initial_station_strategy": fleet_metrics.initial_station_strategy,
+                "initial_station_ids": ",".join(fleet_metrics.initial_station_ids),
+                "transfer_intents": fleet_metrics.transfer_intents,
+                "intended_bikes": fleet_metrics.intended_bikes,
+                "jobs_dispatched": fleet_metrics.jobs_dispatched,
+                "jobs_cancelled_no_vehicle": fleet_metrics.jobs_cancelled_no_vehicle,
+                "jobs_cancelled_no_surplus": fleet_metrics.jobs_cancelled_no_surplus,
+                "undispatched_intent_bikes": fleet_metrics.undispatched_intent_bikes,
+                "pickup_shortfall_bikes": fleet_metrics.pickup_shortfall_bikes,
+                "approach_distance_km": fleet_metrics.approach_distance_km,
+                "loaded_distance_km": fleet_metrics.loaded_distance_km,
+                "total_vehicle_distance_km": fleet_metrics.total_vehicle_distance_km,
+                "approach_minutes": fleet_metrics.approach_minutes,
+                "loaded_minutes": fleet_metrics.loaded_minutes,
+                "handling_minutes": fleet_metrics.handling_minutes,
+                "fleet_busy_minutes": fleet_metrics.busy_minutes,
+                "fleet_utilization_rate": fleet_metrics.utilization_rate,
+                "vehicles_busy_at_end": fleet_metrics.vehicles_busy_at_end,
+                "vehicle_summaries_json": json.dumps(
+                    fleet_metrics.vehicle_summaries,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+            }
+        else:
+            is_instant = scenario_id == "p2r_instant_at_donor"
+            loaded_distance = run.metrics.relocation_distance_km if is_instant else 0.0
+            loaded_drive_minutes = loaded_distance / 20.0 * 60
+            handling = run.metrics.bikes_moved * 0.75 if is_instant else 0.0
+            fleet_fields = {
+                "fleet_size": 0,
+                "initial_station_strategy": "instant_at_donor" if is_instant else "none",
+                "initial_station_ids": "",
+                "transfer_intents": run.metrics.relocation_actions if is_instant else 0,
+                "intended_bikes": run.metrics.bikes_moved if is_instant else 0,
+                "jobs_dispatched": run.metrics.relocation_actions if is_instant else 0,
+                "jobs_cancelled_no_vehicle": 0,
+                "jobs_cancelled_no_surplus": 0,
+                "undispatched_intent_bikes": 0,
+                "pickup_shortfall_bikes": 0,
+                "approach_distance_km": 0.0,
+                "loaded_distance_km": loaded_distance,
+                "total_vehicle_distance_km": loaded_distance,
+                "approach_minutes": 0.0,
+                "loaded_minutes": round(loaded_drive_minutes, 3),
+                "handling_minutes": round(handling, 3),
+                "fleet_busy_minutes": run.metrics.relocation_vehicle_minutes if is_instant else 0.0,
+                "fleet_utilization_rate": None,
+                "vehicles_busy_at_end": 0,
+                "vehicle_summaries_json": "[]",
+            }
+        records.append(
+            {
+                "scenario_id": scenario_id,
+                "execution_model": "persistent_fleet"
+                if fleet_metrics is not None
+                else fleet_fields["initial_station_strategy"],
+                **asdict(run.metrics),
+                "rescued_requests_vs_p0": rescued,
+                "harmed_requests_vs_p0": harmed,
+                "net_failures_avoided_vs_p0": net_failures_avoided,
+                "transition_reconciliation_residual": rescued - harmed - net_failures_avoided,
+                "stations_improved_vs_p0": int((improvements > 0).sum()),
+                "stations_tied_vs_p0": int((improvements == 0).sum()),
+                "stations_worsened_vs_p0": int((improvements < 0).sum()),
+                "failures_added_at_worsened_stations": int(
+                    -active_effects.filter(pl.col("failures_avoided") < 0)["failures_avoided"].sum()
+                ),
+                **fleet_fields,
+            }
+        )
+    return pl.DataFrame(records), tuple(runs)
+
+
+def build_fleet_sensitivity(
+    *,
+    trips_path: Path,
+    station_hour_path: Path,
+    coordinate_path: Path,
+    evaluation_start: datetime,
+    evaluation_end: datetime,
+    fleet_sizes: tuple[int, ...],
+    comparison_csv_path: Path,
+    figure_path: Path,
+    json_path: Path,
+    markdown_path: Path,
+) -> FleetSensitivityExperiment:
+    try:
+        trips = pl.read_parquet(trips_path)
+        station_hour = pl.read_parquet(station_hour_path)
+        coordinate_frame = pl.read_csv(
+            coordinate_path,
+            schema_overrides={"station_id": pl.String},
+        )
+    except (OSError, pl.exceptions.PolarsError) as exc:
+        raise SimulationError(f"fleet 민감도 입력을 읽지 못했습니다: {exc}") from exc
+    required_coordinate_columns = {"station_id", "latitude", "longitude"}
+    missing_columns = required_coordinate_columns - set(coordinate_frame.columns)
+    if missing_columns:
+        raise SimulationError(f"좌표 필수 열 누락: {sorted(missing_columns)}")
+    if coordinate_frame["station_id"].n_unique() != coordinate_frame.height:
+        raise SimulationError("좌표 대여소 ID가 중복됐습니다")
+    coordinates = {
+        str(row["station_id"]): (float(row["latitude"]), float(row["longitude"]))
+        for row in coordinate_frame.iter_rows(named=True)
+    }
+    scenario = build_replay_scenario(
+        trips,
+        station_hour,
+        SimulationConfig(
+            start=evaluation_start,
+            end=evaluation_end,
+            decision_interval_minutes=60,
+            max_bikes_per_decision=40,
+        ),
+        eligible_station_ids=set(coordinates),
+    )
+    frame, runs = run_fleet_sensitivity(
+        scenario,
+        coordinates,
+        fleet_sizes=fleet_sizes,
+    )
+    instant = frame.filter(pl.col("scenario_id") == "p2r_instant_at_donor").row(0, named=True)
+    fleet_vs_instant = []
+    for row in frame.filter(pl.col("execution_model") == "persistent_fleet").iter_rows(named=True):
+        fleet_vs_instant.append(
+            {
+                "scenario_id": row["scenario_id"],
+                "fleet_size": row["fleet_size"],
+                "failed_rentals_change": row["failed_rentals"] - instant["failed_rentals"],
+                "harmed_requests_change": row["harmed_requests_vs_p0"]
+                - instant["harmed_requests_vs_p0"],
+                "p10_service_rate_pp_change": round(
+                    (row["p10_station_service_rate"] - instant["p10_station_service_rate"]) * 100,
+                    3,
+                ),
+                "stations_worsened_change": row["stations_worsened_vs_p0"]
+                - instant["stations_worsened_vs_p0"],
+                "empty_station_hours_change": round(
+                    row["empty_station_hours"] - instant["empty_station_hours"],
+                    3,
+                ),
+                "total_distance_km_change": round(
+                    row["total_vehicle_distance_km"] - instant["total_vehicle_distance_km"],
+                    3,
+                ),
+                "total_distance_multiplier": round(
+                    _rate(
+                        row["total_vehicle_distance_km"],
+                        instant["total_vehicle_distance_km"],
+                    ),
+                    3,
+                ),
+                "approach_distance_share": _rate(
+                    row["approach_distance_km"],
+                    row["total_vehicle_distance_km"],
+                ),
+                "jobs_cancelled_no_vehicle": row["jobs_cancelled_no_vehicle"],
+                "jobs_cancelled_no_surplus": row["jobs_cancelled_no_surplus"],
+                "pickup_shortfall_bikes": row["pickup_shortfall_bikes"],
+                "fleet_utilization_rate": row["fleet_utilization_rate"],
+            }
+        )
+    comparison_csv_path.parent.mkdir(parents=True, exist_ok=True)
+    frame.write_csv(comparison_csv_path)
+    _plot_fleet_sensitivity(frame, figure_path)
+    output_files = {
+        "fleet_comparison": str(comparison_csv_path),
+        "fleet_figure": str(figure_path),
+        "json_report": str(json_path),
+        "markdown_report": str(markdown_path),
+    }
+    vehicle_summaries = {
+        scenario_id: run.fleet_metrics.vehicle_summaries
+        for scenario_id, run in runs
+        if run.fleet_metrics is not None
+    }
+    experiment = FleetSensitivityExperiment(
+        generated_at_utc=datetime.now(UTC).isoformat(),
+        method="post_hoc_execution_model_sensitivity",
+        evaluation_window=f"{evaluation_start.isoformat()} <= t < {evaluation_end.isoformat()}",
+        stations=len(coordinates),
+        observed_requests=int(frame["observed_requests"][0]),
+        policy={
+            "name": "P2-R protected greedy-nearest",
+            "donor_reserve_bikes": 7,
+            "lower_threshold": 2,
+            "target_bikes": 5,
+            "upper_threshold": 8,
+            "max_actions_per_decision": 3,
+            "vehicle_capacity": 10,
+            "average_speed_kmh": 20.0,
+            "road_distance_factor": 1.3,
+            "handling_minutes_per_bike": 0.75,
+        },
+        scenario_runs=tuple(frame.to_dicts()),
+        fleet_vs_instant=tuple(fleet_vs_instant),
+        vehicle_summaries=vehicle_summaries,
+        limitations=(
+            "같은 홀드아웃을 재사용한 사후 실행모델 민감도이며 독립 검증이 아니다.",
+            "fleet 1·2·3과 greedy medoids 초기 위치는 공식 운영정보가 아닌 합성 가정이다.",
+            "실제 차고지·교대·휴식·교통·신호·작업자 비용을 반영하지 않는다.",
+            "정시 판단 사이에 차량이 idle이 돼도 다음 정시까지 새 작업을 받지 않는다.",
+            "공개 이력의 성공 요청만 재생해 품절로 관측되지 않은 잠재 수요는 제외한다.",
+            "현재 좌표 스냅샷이 2025년 운영 당시 위치와 다를 수 있다.",
+        ),
+        output_files=output_files,
+    )
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    markdown_path.parent.mkdir(parents=True, exist_ok=True)
+    json_path.write_text(
+        json.dumps(asdict(experiment), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    markdown_path.write_text(
+        _render_fleet_sensitivity_markdown(experiment),
+        encoding="utf-8",
+    )
+    return experiment
+
+
+def _render_fleet_sensitivity_markdown(experiment: FleetSensitivityExperiment) -> str:
+    result_header = (
+        "| 시나리오 | fleet | 성공률 | 실패 | 구제 | 악화 | p10 | 악화 대여소 | "
+        "접근km | 적재km | 총km | 가동률 |"
+    )
+    comparison_header = (
+        "| fleet | 실패 변화 | 악화 변화 | p10 변화(%p) | 악화 대여소 변화 | "
+        "총거리 변화 | 거리 배수 | 접근 비중 | 차량부족 취소 | 재고부족 취소 |"
+    )
+    runs_by_id = {row["scenario_id"]: row for row in experiment.scenario_runs}
+    p0_failed = runs_by_id["p0_no_relocation"]["failed_rentals"]
+    finding_lines = "\n".join(
+        "- fleet {fleet}: P0 대비 실패 {avoided:,}건 방지, 즉시출발보다 {gap:+,}건, "
+        "총 {distance:,.1f}km({multiplier:.2f}배) 중 접근 {approach:.1%}, "
+        "차량부족 미실행 {cancelled:,}건".format(
+            fleet=comparison["fleet_size"],
+            avoided=p0_failed - runs_by_id[comparison["scenario_id"]]["failed_rentals"],
+            gap=comparison["failed_rentals_change"],
+            distance=runs_by_id[comparison["scenario_id"]]["total_vehicle_distance_km"],
+            multiplier=comparison["total_distance_multiplier"],
+            approach=comparison["approach_distance_share"],
+            cancelled=comparison["jobs_cancelled_no_vehicle"],
+        )
+        for comparison in experiment.fleet_vs_instant
+    )
+    rows = "\n".join(
+        "| {scenario} | {fleet} | {service:.2%} | {failed:,} | {rescued:,} | "
+        "{harmed:,} | {p10:.2%} | {worsened} | {approach:,.1f} | {loaded:,.1f} | "
+        "{total:,.1f} | {utilization} |".format(
+            scenario=row["scenario_id"],
+            fleet=row["fleet_size"] if row["fleet_size"] else "-",
+            service=row["service_rate"],
+            failed=row["failed_rentals"],
+            rescued=row["rescued_requests_vs_p0"],
+            harmed=row["harmed_requests_vs_p0"],
+            p10=row["p10_station_service_rate"],
+            worsened=row["stations_worsened_vs_p0"],
+            approach=row["approach_distance_km"],
+            loaded=row["loaded_distance_km"],
+            total=row["total_vehicle_distance_km"],
+            utilization=(
+                f"{row['fleet_utilization_rate']:.2%}"
+                if row["fleet_utilization_rate"] is not None
+                else "-"
+            ),
+        )
+        for row in experiment.scenario_runs
+    )
+    comparisons = "\n".join(
+        "| {fleet} | {failed:+,} | {harmed:+,} | {p10:+.3f} | {worsened:+,} | "
+        "{distance:+,.1f} | {multiplier:.2f}x | {approach:.1%} | {no_vehicle:,} | "
+        "{no_surplus:,} |".format(
+            fleet=row["fleet_size"],
+            failed=row["failed_rentals_change"],
+            harmed=row["harmed_requests_change"],
+            p10=row["p10_service_rate_pp_change"],
+            worsened=row["stations_worsened_change"],
+            distance=row["total_distance_km_change"],
+            multiplier=row["total_distance_multiplier"],
+            approach=row["approach_distance_share"],
+            no_vehicle=row["jobs_cancelled_no_vehicle"],
+            no_surplus=row["jobs_cancelled_no_surplus"],
+        )
+        for row in experiment.fleet_vs_instant
+    )
+    limitations = "\n".join(f"- {item}" for item in experiment.limitations)
+    return f"""# 강남구 P2-R fleet 실행모델 사후 민감도
+
+## 결론
+
+- 방법: `{experiment.method}`
+- 평가기간: `{experiment.evaluation_window}`
+- 동일 대여소·요청: {experiment.stations}개·{experiment.observed_requests:,}건
+- 정책: donor reserve {experiment.policy["donor_reserve_bikes"]}, 시간당 intent 최대
+  {experiment.policy["max_actions_per_decision"]}개, 적재 {experiment.policy["vehicle_capacity"]}대
+- fleet 1·2·3은 실제 운영값이 아니라 접근·busy 제약에 따른 성능 범위다.
+
+{finding_lines}
+
+fleet 3도 즉시출발보다 실패가 남고 총거리의 대부분이 공차 접근이다. 차량 수가 늘수록 서비스는
+개선되지만 이동거리도 커지므로 공식 운영정보 없이 단일 fleet을 정답으로 고르지 않는다.
+
+## 전체 결과
+
+{result_header}
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+{rows}
+
+## 기존 즉시출발 P2-R 대비
+
+{comparison_header}
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+{comparisons}
+
+즉시출발은 fleet 수가 무한하고 각 공급지에 차량이 미리 놓인 것과 비슷한 낙관 참조다. fleet
+결과는 정책 순위를 다시 고르는 근거가 아니라, 같은 P2-R transfer intent가 차량 접근과 busy
+제약에서 어느 범위로 약화되는지 보여준다.
+
+## 불변조건
+
+- 모든 시나리오는 같은 초기 재고, 대여소, 요청 키·시각·순서를 사용한다.
+- donor reserve 7과 정책 임계값은 다시 학습하지 않는다.
+- 구제 - 악화 = P0 대비 순 실패 방지이며 자전거 보존식 잔차는 0이다.
+- fleet의 접근거리 + 적재거리 = 총거리이며 가동률은 0~1 범위다.
+- 같은 차량의 busy 작업은 겹치지 않고 공급지 재고는 픽업 때 차감한다.
+
+## 해석 제한
+
+{limitations}
+
+## 다음 단계
+
+1. fleet 범위를 README 포트폴리오의 운영 현실성 한계에 반영한다.
+2. 실제 차량 수·차고지·교대 데이터가 생기기 전에는 단일 fleet 권고를 하지 않는다.
+3. 다음 분석 축은 잠재수요 낮음·기준·높음 시나리오로 분리한다.
+"""
+
+
 def run_request_transition_trace(
     scenario: ReplayScenario,
     coordinates: dict[str, tuple[float, float]],
@@ -4556,6 +5016,137 @@ def _plot_donor_reserve_holdout(frame: pl.DataFrame, path: Path) -> None:
         for axis in axes.flat:
             axis.grid(axis="y", alpha=0.2)
         figure.suptitle("강남구 donor reserve 단일 홀드아웃: P0·P2·P3")
+        figure.tight_layout()
+        figure.savefig(path, dpi=160)
+        plt.close(figure)
+
+
+def _plot_fleet_sensitivity(frame: pl.DataFrame, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    labels = [
+        "P0"
+        if scenario_id == "p0_no_relocation"
+        else "즉시"
+        if scenario_id == "p2r_instant_at_donor"
+        else scenario_id.replace("p2r_fleet_", "F")
+        for scenario_id in frame["scenario_id"].to_list()
+    ]
+    x_values = list(range(len(labels)))
+    malgun_path = Path("C:/Windows/Fonts/malgun.ttf")
+    font_family = "DejaVu Sans"
+    if malgun_path.exists():
+        font_manager.fontManager.addfont(str(malgun_path))
+        font_family = font_manager.FontProperties(fname=str(malgun_path)).get_name()
+    with plt.rc_context({"font.family": font_family, "axes.unicode_minus": False}):
+        figure, axes = plt.subplots(2, 2, figsize=(14, 9.5))
+        bar_width = 0.24
+        failed = frame["failed_rentals"].to_list()
+        rescued = frame["rescued_requests_vs_p0"].to_list()
+        harmed = frame["harmed_requests_vs_p0"].to_list()
+        axes[0, 0].bar(
+            [value - bar_width for value in x_values],
+            failed,
+            width=bar_width,
+            label="실패",
+            color="#4e79a7",
+        )
+        axes[0, 0].bar(
+            x_values,
+            rescued,
+            width=bar_width,
+            label="구제",
+            color="#59a14f",
+        )
+        axes[0, 0].bar(
+            [value + bar_width for value in x_values],
+            harmed,
+            width=bar_width,
+            label="악화",
+            color="#e15759",
+        )
+        axes[0, 0].set_title("요청 결과")
+        axes[0, 0].set_ylabel("요청(건)")
+        axes[0, 0].set_xticks(x_values, labels)
+        axes[0, 0].legend()
+
+        service = [value * 100 for value in frame["service_rate"].to_list()]
+        p10 = [value * 100 for value in frame["p10_station_service_rate"].to_list()]
+        axes[0, 1].bar(
+            [value - bar_width / 2 for value in x_values],
+            service,
+            width=bar_width,
+            label="전체",
+            color="#76b7b2",
+        )
+        axes[0, 1].bar(
+            [value + bar_width / 2 for value in x_values],
+            p10,
+            width=bar_width,
+            label="p10",
+            color="#f28e2b",
+        )
+        axes[0, 1].set_title("전체·하위 대여소 성공률")
+        axes[0, 1].set_ylabel("성공률(%)")
+        axes[0, 1].set_xticks(x_values, labels)
+        axes[0, 1].legend()
+
+        approach = frame["approach_distance_km"].to_list()
+        loaded = frame["loaded_distance_km"].to_list()
+        axes[1, 0].bar(labels, loaded, label="적재", color="#4e79a7")
+        axes[1, 0].bar(
+            labels,
+            approach,
+            bottom=loaded,
+            label="공차 접근",
+            color="#f28e2b",
+        )
+        axes[1, 0].set_title("차량 이동거리 분해")
+        axes[1, 0].set_ylabel("거리(km)")
+        axes[1, 0].legend()
+
+        dispatched = frame["jobs_dispatched"].to_list()
+        cancelled = frame["jobs_cancelled_no_vehicle"].to_list()
+        axes[1, 1].bar(
+            [value - bar_width / 2 for value in x_values],
+            dispatched,
+            width=bar_width,
+            label="배차",
+            color="#59a14f",
+        )
+        axes[1, 1].bar(
+            [value + bar_width / 2 for value in x_values],
+            cancelled,
+            width=bar_width,
+            label="차량부족 미실행",
+            color="#e15759",
+        )
+        axes[1, 1].set_title("작업 실행과 차량 가동률")
+        axes[1, 1].set_ylabel("작업(건)")
+        axes[1, 1].set_xticks(x_values, labels)
+        utilization_axis = axes[1, 1].twinx()
+        utilization = [
+            float("nan") if value is None else value * 100
+            for value in frame["fleet_utilization_rate"].to_list()
+        ]
+        utilization_axis.plot(
+            x_values,
+            utilization,
+            marker="o",
+            linewidth=2,
+            color="#7b2cbf",
+            label="가동률",
+        )
+        utilization_axis.set_ylabel("가동률(%)")
+        handles, legend_labels = axes[1, 1].get_legend_handles_labels()
+        utilization_handles, utilization_labels = utilization_axis.get_legend_handles_labels()
+        axes[1, 1].legend(
+            handles + utilization_handles,
+            legend_labels + utilization_labels,
+        )
+
+        for axis in axes.flat:
+            axis.grid(axis="y", alpha=0.2)
+        figure.suptitle("강남구 P2-R fleet 1·2·3 사후 실행모델 민감도")
         figure.tight_layout()
         figure.savefig(path, dpi=160)
         plt.close(figure)
