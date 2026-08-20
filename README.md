@@ -22,9 +22,9 @@
 |---|---:|---:|---:|---:|---:|---:|---:|
 | P0 재배치 없음 | 88.24% | 1,905건 | 0건 | 54.07% | 0곳 | 0대 | 0.0km |
 | P2 서비스형, reserve 5 | 95.92% | 661건 | 122건 | 89.09% | 17곳 | 1,435대 | 336.8km |
-| **P3 보호형, reserve 7** | **95.74%** | **691건** | **100건** | **87.80%** | **12곳** | **1,224대** | **359.2km** |
+| **보호형 P2-R, reserve 7** | **95.74%** | **691건** | **100건** | **87.80%** | **12곳** | **1,224대** | **359.2km** |
 
-P3는 P2보다 전체 실패가 30건 늘고 p10이 1.286%p 낮아졌습니다. 반면 P0에서는 성공했지만
+P2-R은 P2보다 전체 실패가 30건 늘고 p10이 1.286%p 낮아졌습니다. 반면 P0에서는 성공했지만
 정책 때문에 실패한 요청을 22건 줄였고, 악화 대여소도 17곳에서 12곳으로 줄였습니다. 이동
 대수는 211대 감소했으나 더 먼 공급지를 이용해 총 거리는 22.4km 늘었습니다.
 
@@ -58,7 +58,7 @@ flowchart LR
 
 ## 시뮬레이터가 반영하는 것
 
-- 동일 초기 재고와 동일 요청 순서에서 P0·P1·P2·P3를 결정론적으로 비교
+- 동일 초기 재고와 동일 요청 순서에서 P0·P1·P2-S·P2-R을 결정론적으로 비교
 - 대여 성공/실패, 내부 반납, 강남구 외부 유입·유출 이벤트를 시간순으로 처리
 - 실패한 대여의 후속 반납을 억제해 존재하지 않는 자전거가 생기지 않도록 처리
 - Haversine 거리, 도로거리 보정, 평균속도, 상하차 시간에 따른 재배치 지연 도착
@@ -82,8 +82,12 @@ flowchart LR
 | 시간 강건성 | 30일 모두 P2가 P0보다 개선되는지 날짜별 확인 | [일별 강건성](reports/gangnam_2025_11_daily_robustness.md) |
 | 공간 형평성 | 개선·동률·악화 대여소와 p10 서비스율 | [대여소 형평성](reports/gangnam_2025_11_station_equity.md) |
 | 요청 피해 | P0 성공에서 정책 실패로 바뀐 요청과 선행 유출 추적 | [요청 trace](reports/gangnam_2025_11_harm_trace.md) |
-| P3 학습 | reserve 5·6·7·8의 비가중 Pareto 비교 | [reserve 학습](reports/gangnam_2025_11_donor_reserve_training.md) |
-| P3 검증 | 동결한 reserve 7과 기존 reserve 5의 단일 홀드아웃 | [reserve 홀드아웃](reports/gangnam_2025_11_donor_reserve_holdout.md) |
+| 공급지 보호 학습 | reserve 5·6·7·8의 비가중 Pareto 비교 | [reserve 학습](reports/gangnam_2025_11_donor_reserve_training.md) |
+| 공급지 보호 검증 | 동결한 reserve 7과 기존 reserve 5의 단일 홀드아웃 | [reserve 홀드아웃](reports/gangnam_2025_11_donor_reserve_holdout.md) |
+
+기존 결과 파일은 보호형 정책을 P3라고 표기했지만, 초기 계획의 `Forecast + min-cost flow`
+P3와 충돌해 이후 명칭을 `P2-R`로 정리했습니다. 자세한 경계는
+[차량 실행모델 계약](docs/VEHICLE_ROUTING_CONTRACT.md)에 기록했습니다.
 
 ## 재현 방법
 
@@ -164,6 +168,7 @@ uv run ddareungi run-donor-reserve-holdout
 
 - [전체 프로젝트 계획](docs/PROJECT_PLAN.md)
 - [현재 상태와 검증 기록](docs/STATE.md)
+- [차량 접근·연속 경로 구현 계약](docs/VEHICLE_ROUTING_CONTRACT.md)
 - [자율 실행 루프와 중단 규칙](LOOP.md)
 
 ## 데이터 출처
