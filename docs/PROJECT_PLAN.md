@@ -160,6 +160,12 @@ Colab Notebook을 만들더라도 핵심 로직을 셀에 복사하지 않는다
 
 두 번째 결과는 관측값이 아니라 모델 추정값으로 표시하고, 낮음·기준·높음 세 수준의 민감도 범위를 제공한다.
 
+잠재수요 v1은 시간별 재고의 0대 경계와 학습기간 비품절 대여율을 결합한 Poisson 민감도로
+동결했다. 평가 정책의 시뮬레이션 재고가 아니라 정책 실행 전에 만든 공통 요청열을 사용하며,
+세 수준은 `low ⊆ base ⊆ high`로 중첩된다. ID·강도 backoff·경험적 상한·50개 공통 seed·
+합성 반납·자전거 보존식·누수 방지 규칙은
+[잠재수요 생성 계약](LATENT_DEMAND_CONTRACT.md)을 따른다.
+
 #### 실제 재배치 이력 부재 가능성
 
 공개 데이터에 차량별 재배치 기록이 없다면 재고 스냅샷과 대여·반납 흐름의 잔차로 재배치량을 추정한다. 추정 재배치는 `inferred`로 표시하고 실제 운영기록이라고 표현하지 않는다.
@@ -217,6 +223,8 @@ v1은 **Python 이벤트 우선순위 큐를 이용한 자체 이벤트 엔진**
 - `origin_station_id`, `destination_station_id`
 - `duration_minutes`
 - `source`: `observed` 또는 `synthetic_latent`
+- 합성 전용: `latent_min_scenario`, `generation_seed`, `censor_interval_id`
+- 감사 필드: `intensity_pool`, `trip_pool`, `contract_version`
 
 #### StationState
 
