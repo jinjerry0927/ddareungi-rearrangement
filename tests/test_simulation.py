@@ -10,6 +10,7 @@ from ddareungi_rearrangement.simulation import (
     SimulationConfig,
     StaticThresholdPolicy,
     build_replay_scenario,
+    run_spatial_sensitivity,
     simulate_replay,
     snapshot_actionable_coordinates,
 )
@@ -216,3 +217,42 @@ def test_delayed_relocation_arrival_changes_request_outcome_and_preserves_bikes(
     assert run.metrics.relocation_distance_km > 0
     assert run.metrics.relocation_bikes_in_transit_at_end == 0
     assert run.metrics.conservation_residual == 0
+
+
+def test_spatial_sensitivity_runs_full_grid_with_shared_requests_and_constraints() -> None:
+    start = datetime(2025, 11, 24)
+    end = datetime(2025, 11, 24, 1)
+    trips = pl.DataFrame(
+        {
+            "rent_at": [
+                datetime(2025, 11, 24, 0, 2),
+                datetime(2025, 11, 24, 0, 3),
+            ],
+            "return_at": [
+                datetime(2025, 11, 24, 0, 20),
+                datetime(2025, 11, 24, 0, 21),
+            ],
+            "rent_station_id": ["A", "A"],
+            "return_station_id": ["OUT", "OUT"],
+        }
+    )
+    scenario = build_replay_scenario(
+        trips,
+        _station_hour(start, bikes_a=0, bikes_b=10),
+        SimulationConfig(start=start, end=end, max_bikes_per_decision=4),
+    )
+
+    frame = run_spatial_sensitivity(
+        scenario,
+        {"A": (37.5, 127.0), "B": (37.5, 127.001)},
+        action_counts=(1, 2),
+        speeds_kmh=(15.0,),
+        vehicle_capacities=(2,),
+    )
+
+    assert frame.height == 2
+    assert frame["observed_requests"].unique().to_list() == [2]
+    assert frame["conservation_residual"].unique().to_list() == [0]
+    assert frame["relocation_bikes_in_transit_at_end"].unique().to_list() == [0]
+    assert (frame["max_relocation_actions_in_epoch"] <= frame["max_actions_per_decision"]).all()
+    assert (frame["relocation_distance_km"] > 0).all()

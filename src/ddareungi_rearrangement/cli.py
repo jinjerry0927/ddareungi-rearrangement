@@ -27,6 +27,7 @@ from ddareungi_rearrangement.simulation import (
     SimulationError,
     build_policy_comparison,
     build_spatial_policy_comparison,
+    build_spatial_sensitivity,
     snapshot_actionable_coordinates,
 )
 
@@ -261,6 +262,66 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("reports/gangnam_2025_11_spatial_simulation.md"),
     )
+    sensitivity_parser = subparsers.add_parser(
+        "run-sensitivity",
+        help="P2 직접 운송 횟수·속도·적재량의 전 요인 조합을 비교합니다.",
+    )
+    sensitivity_parser.add_argument(
+        "--trips-file",
+        type=Path,
+        default=Path("data/processed/gangnam_2025_11_trips.parquet"),
+    )
+    sensitivity_parser.add_argument(
+        "--station-hour-file",
+        type=Path,
+        default=Path("data/processed/gangnam_2025_11_station_hour.parquet"),
+    )
+    sensitivity_parser.add_argument(
+        "--coordinate-file",
+        type=Path,
+        default=Path("data/sample/gangnam_station_coordinates_2026_08_20.csv"),
+    )
+    sensitivity_parser.add_argument("--evaluation-start", default="2025-11-24")
+    sensitivity_parser.add_argument("--evaluation-end", default="2025-11-29")
+    sensitivity_parser.add_argument("--decision-interval-minutes", type=int, default=60)
+    sensitivity_parser.add_argument(
+        "--action-counts",
+        type=int,
+        nargs="+",
+        default=[1, 2, 3],
+    )
+    sensitivity_parser.add_argument(
+        "--speeds-kmh",
+        type=float,
+        nargs="+",
+        default=[10.0, 15.0, 20.0],
+    )
+    sensitivity_parser.add_argument(
+        "--vehicle-capacities",
+        type=int,
+        nargs="+",
+        default=[10, 20],
+    )
+    sensitivity_parser.add_argument(
+        "--comparison-output",
+        type=Path,
+        default=Path("reports/data/gangnam_2025_11_p2_sensitivity.csv"),
+    )
+    sensitivity_parser.add_argument(
+        "--figure-output",
+        type=Path,
+        default=Path("reports/figures/gangnam_2025_11_p2_sensitivity.png"),
+    )
+    sensitivity_parser.add_argument(
+        "--json-output",
+        type=Path,
+        default=Path("reports/gangnam_2025_11_p2_sensitivity.json"),
+    )
+    sensitivity_parser.add_argument(
+        "--markdown-output",
+        type=Path,
+        default=Path("reports/gangnam_2025_11_p2_sensitivity.md"),
+    )
     return parser
 
 
@@ -429,6 +490,43 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"Spatial comparison stations: {experiment.stations}")
         print(f"P2 failures avoided vs P0: {p2['failures_avoided_vs_p0']:,.0f}")
         print(f"P2 additional failures vs P1: {p2['additional_failures_vs_p1']:,.0f}")
+        print(f"Report: {args.markdown_output}")
+        return 0
+    if args.command == "run-sensitivity":
+        try:
+            experiment = build_spatial_sensitivity(
+                trips_path=args.trips_file,
+                station_hour_path=args.station_hour_file,
+                coordinate_path=args.coordinate_file,
+                evaluation_start=datetime.fromisoformat(args.evaluation_start),
+                evaluation_end=datetime.fromisoformat(args.evaluation_end),
+                decision_interval_minutes=args.decision_interval_minutes,
+                action_counts=tuple(args.action_counts),
+                speeds_kmh=tuple(args.speeds_kmh),
+                vehicle_capacities=tuple(args.vehicle_capacities),
+                comparison_csv_path=args.comparison_output,
+                figure_path=args.figure_output,
+                json_path=args.json_output,
+                markdown_path=args.markdown_output,
+            )
+        except (SimulationError, ValueError, OSError) as exc:
+            print(f"Sensitivity simulation failed: {exc}")
+            return 1
+
+        best = experiment.service_best
+        efficient = experiment.distance_efficiency_best
+        print(f"Sensitivity combinations: {len(experiment.runs)}")
+        print(
+            "Service best: "
+            f"{best['max_actions_per_decision']} actions, "
+            f"capacity {best['equivalent_vehicle_capacities']}, "
+            f"{best['average_speed_kmh']:g} km/h, "
+            f"{best['failed_rentals']} failures"
+        )
+        print(
+            "Distance efficiency best: "
+            f"{efficient['failures_avoided_per_100km']:,.1f} avoided failures/100km"
+        )
         print(f"Report: {args.markdown_output}")
         return 0
     if args.command == "run-simulation":

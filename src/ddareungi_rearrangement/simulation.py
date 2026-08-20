@@ -345,6 +345,27 @@ class SpatialSimulationExperiment:
     output_files: dict[str, str]
 
 
+@dataclass(frozen=True)
+class SensitivityExperiment:
+    generated_at_utc: str
+    method: str
+    evaluation_window: str
+    stations: int
+    coordinate_file: str
+    excluded_station_ids: tuple[str, ...]
+    factors: dict[str, Any]
+    baseline: dict[str, Any]
+    runs: tuple[dict[str, Any], ...]
+    service_best: dict[str, Any]
+    empty_time_best: dict[str, Any]
+    distance_efficiency_best: dict[str, Any]
+    default_scenario: dict[str, Any]
+    factor_findings: dict[str, Any]
+    marginal_actions: tuple[dict[str, Any], ...]
+    limitations: tuple[str, ...]
+    output_files: dict[str, str]
+
+
 DEFAULT_CANDIDATES = (
     ThresholdCandidate("conservative", 1, 4, 8),
     ThresholdCandidate("balanced", 2, 5, 8),
@@ -1174,6 +1195,419 @@ def build_spatial_policy_comparison(
     return experiment
 
 
+def run_spatial_sensitivity(
+    scenario: ReplayScenario,
+    coordinates: dict[str, tuple[float, float]],
+    *,
+    action_counts: tuple[int, ...] = (1, 2, 3),
+    speeds_kmh: tuple[float, ...] = (10.0, 15.0, 20.0),
+    vehicle_capacities: tuple[int, ...] = (10, 20),
+) -> pl.DataFrame:
+    if not action_counts or not speeds_kmh or not vehicle_capacities:
+        raise ValueError("민감도 요인에는 각각 하나 이상의 값이 필요합니다")
+    if any(value <= 0 for value in (*action_counts, *speeds_kmh, *vehicle_capacities)):
+        raise ValueError("민감도 요인 값은 모두 양수여야 합니다")
+    required_budget = max(action_counts) * max(vehicle_capacities)
+    if scenario.config.max_bikes_per_decision < required_budget:
+        raise SimulationError(
+            "시나리오 이동 한도가 민감도 최대 조합보다 작습니다: "
+            f"{scenario.config.max_bikes_per_decision} < {required_budget}"
+        )
+
+    baseline = simulate_replay(scenario, NoRelocationPolicy()).metrics
+    records: list[dict[str, Any]] = []
+    for actions in action_counts:
+        for capacity in vehicle_capacities:
+            for speed in speeds_kmh:
+                policy = GreedyNearestPolicy(
+                    coordinates=coordinates,
+                    lower_threshold=2,
+                    target_bikes=5,
+                    upper_threshold=8,
+                    max_actions_per_decision=actions,
+                    vehicle_capacity=capacity,
+                    average_speed_kmh=speed,
+                    road_distance_factor=1.3,
+                    handling_minutes_per_bike=0.75,
+                    name=f"greedy_a{actions}_c{capacity}_s{speed:g}",
+                )
+                metrics = simulate_replay(scenario, policy).metrics
+                failures_avoided = baseline.failed_rentals - metrics.failed_rentals
+                records.append(
+                    {
+                        "scenario_id": policy.name,
+                        "max_actions_per_decision": actions,
+                        "average_speed_kmh": float(speed),
+                        "vehicle_capacity": capacity,
+                        **asdict(metrics),
+                        "failures_avoided_vs_p0": failures_avoided,
+                        "failure_reduction_rate_vs_p0": _rate(
+                            failures_avoided, baseline.failed_rentals
+                        ),
+                        "service_rate_percentage_point_vs_p0": round(
+                            (metrics.service_rate - baseline.service_rate) * 100,
+                            3,
+                        ),
+                        "empty_hours_reduced_vs_p0": round(
+                            baseline.empty_station_hours - metrics.empty_station_hours,
+                            3,
+                        ),
+                        "failures_avoided_per_100km": round(
+                            100 * _rate(failures_avoided, metrics.relocation_distance_km),
+                            3,
+                        ),
+                    }
+                )
+    return pl.DataFrame(records).sort(
+        "max_actions_per_decision", "vehicle_capacity", "average_speed_kmh"
+    )
+
+
+def build_spatial_sensitivity(
+    *,
+    trips_path: Path,
+    station_hour_path: Path,
+    coordinate_path: Path,
+    evaluation_start: datetime,
+    evaluation_end: datetime,
+    decision_interval_minutes: int,
+    action_counts: tuple[int, ...],
+    speeds_kmh: tuple[float, ...],
+    vehicle_capacities: tuple[int, ...],
+    comparison_csv_path: Path,
+    figure_path: Path,
+    json_path: Path,
+    markdown_path: Path,
+) -> SensitivityExperiment:
+    try:
+        trips = pl.read_parquet(trips_path)
+        station_hour = pl.read_parquet(station_hour_path)
+        coordinate_frame = pl.read_csv(
+            coordinate_path,
+            schema_overrides={"station_id": pl.String},
+        )
+    except (OSError, pl.exceptions.PolarsError) as exc:
+        raise SimulationError(f"민감도 분석 입력을 읽지 못했습니다: {exc}") from exc
+    required_coordinate_columns = {"station_id", "latitude", "longitude"}
+    missing_columns = required_coordinate_columns - set(coordinate_frame.columns)
+    if missing_columns:
+        raise SimulationError(f"좌표 필수 열 누락: {sorted(missing_columns)}")
+    if coordinate_frame["station_id"].n_unique() != coordinate_frame.height:
+        raise SimulationError("좌표 대여소 ID가 중복됐습니다")
+
+    coordinates = {
+        str(row["station_id"]): (float(row["latitude"]), float(row["longitude"]))
+        for row in coordinate_frame.iter_rows(named=True)
+    }
+    eligible_station_ids = set(coordinates)
+    all_actionable_ids = set(
+        station_hour.filter(pl.col("actionable"))["station_id"].unique().to_list()
+    )
+    excluded_station_ids = tuple(
+        sorted(all_actionable_ids - eligible_station_ids, key=lambda value: int(value))
+    )
+    max_bikes_per_decision = max(action_counts) * max(vehicle_capacities)
+    scenario = build_replay_scenario(
+        trips,
+        station_hour,
+        SimulationConfig(
+            start=evaluation_start,
+            end=evaluation_end,
+            decision_interval_minutes=decision_interval_minutes,
+            max_bikes_per_decision=max_bikes_per_decision,
+        ),
+        eligible_station_ids=eligible_station_ids,
+    )
+    baseline_metrics = simulate_replay(scenario, NoRelocationPolicy()).metrics
+    frame = run_spatial_sensitivity(
+        scenario,
+        coordinates,
+        action_counts=action_counts,
+        speeds_kmh=speeds_kmh,
+        vehicle_capacities=vehicle_capacities,
+    )
+    service_best = frame.sort(
+        "failed_rentals", "relocation_vehicle_minutes", "relocation_distance_km"
+    ).row(0, named=True)
+    service_best["equivalent_vehicle_capacities"] = sorted(
+        frame.filter(pl.col("failed_rentals") == service_best["failed_rentals"])["vehicle_capacity"]
+        .unique()
+        .to_list()
+    )
+    empty_time_best = frame.sort(
+        "empty_station_hours", "failed_rentals", "relocation_vehicle_minutes"
+    ).row(0, named=True)
+    empty_time_best["equivalent_vehicle_capacities"] = sorted(
+        frame.filter(pl.col("empty_station_hours") == empty_time_best["empty_station_hours"])[
+            "vehicle_capacity"
+        ]
+        .unique()
+        .to_list()
+    )
+    distance_efficiency_best = frame.sort(
+        "failures_avoided_per_100km",
+        "failed_rentals",
+        descending=[True, False],
+    ).row(0, named=True)
+    default_rows = frame.filter(
+        (pl.col("max_actions_per_decision") == 2)
+        & (pl.col("average_speed_kmh") == 15.0)
+        & (pl.col("vehicle_capacity") == 20)
+    )
+    default_scenario = (
+        default_rows.row(0, named=True) if default_rows.height == 1 else frame.row(0, named=True)
+    )
+    capacity_failure_spread = (
+        frame.group_by("max_actions_per_decision", "average_speed_kmh")
+        .agg((pl.col("failed_rentals").max() - pl.col("failed_rentals").min()).alias("spread"))[
+            "spread"
+        ]
+        .max()
+    )
+    speed_failure_spread = (
+        frame.group_by("max_actions_per_decision", "vehicle_capacity")
+        .agg((pl.col("failed_rentals").max() - pl.col("failed_rentals").min()).alias("spread"))[
+            "spread"
+        ]
+        .max()
+    )
+    action_failure_spread = (
+        frame.group_by("average_speed_kmh", "vehicle_capacity")
+        .agg((pl.col("failed_rentals").max() - pl.col("failed_rentals").min()).alias("spread"))[
+            "spread"
+        ]
+        .max()
+    )
+    factor_findings = {
+        "max_failed_rental_spread_from_capacity": int(capacity_failure_spread or 0),
+        "max_failed_rental_spread_from_speed": int(speed_failure_spread or 0),
+        "max_failed_rental_spread_from_actions": int(action_failure_spread or 0),
+        "capacity_non_binding_reason": (
+            "수신 대여소 목표가 5대라 직접 운송 1회의 필요량이 최대 5대이며, "
+            "비교한 적재량 10대와 20대는 모두 이를 초과한다."
+        ),
+    }
+    marginal_actions = _calculate_action_marginals(frame)
+
+    comparison_csv_path.parent.mkdir(parents=True, exist_ok=True)
+    frame.write_csv(comparison_csv_path)
+    _plot_spatial_sensitivity(frame, figure_path)
+    output_files = {
+        "sensitivity_grid": str(comparison_csv_path),
+        "sensitivity_figure": str(figure_path),
+        "json_report": str(json_path),
+        "markdown_report": str(markdown_path),
+    }
+    experiment = SensitivityExperiment(
+        generated_at_utc=datetime.now(UTC).isoformat(),
+        method="observed_trip_replay_spatial_factorial_sensitivity",
+        evaluation_window=f"{evaluation_start.isoformat()} <= t < {evaluation_end.isoformat()}",
+        stations=len(eligible_station_ids),
+        coordinate_file=str(coordinate_path),
+        excluded_station_ids=excluded_station_ids,
+        factors={
+            "max_direct_trips_per_decision": list(action_counts),
+            "average_speed_kmh": list(speeds_kmh),
+            "vehicle_capacity": list(vehicle_capacities),
+            "decision_interval_minutes": decision_interval_minutes,
+            "scenario_max_bikes_per_decision": max_bikes_per_decision,
+            "lower_target_upper_thresholds": [2, 5, 8],
+            "road_distance_factor": 1.3,
+            "handling_minutes_per_bike": 0.75,
+        },
+        baseline=asdict(baseline_metrics),
+        runs=tuple(frame.to_dicts()),
+        service_best=service_best,
+        empty_time_best=empty_time_best,
+        distance_efficiency_best=distance_efficiency_best,
+        default_scenario=default_scenario,
+        factor_findings=factor_findings,
+        marginal_actions=marginal_actions,
+        limitations=(
+            "공개 대여이력에 기록된 성공 요청만 재생하고 미관측 잠재 수요는 제외한다.",
+            "직접 운송 횟수는 운영능력의 대리변수이며 실제 독립 차량 대수와 같지 않다.",
+            "차량은 공급 대여소에서 바로 출발해 첫 접근 이동과 차량 간 경로 연결을 제외한다.",
+            "거리 효율은 비용이 아니라 100km당 방지 실패이며 인건비·차량비를 포함하지 않는다.",
+            "고정 평균속도와 직선거리 보정값을 사용하며 실제 교통·신호는 반영하지 않는다.",
+            "명목 거치대 수를 하드 용량으로 쓰지 않아 반납 실패는 계산하지 않는다.",
+        ),
+        output_files=output_files,
+    )
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    markdown_path.parent.mkdir(parents=True, exist_ok=True)
+    json_path.write_text(
+        json.dumps(asdict(experiment), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    markdown_path.write_text(_render_sensitivity_markdown(experiment), encoding="utf-8")
+    return experiment
+
+
+def _calculate_action_marginals(frame: pl.DataFrame) -> tuple[dict[str, Any], ...]:
+    records: list[dict[str, Any]] = []
+    for speed in sorted(frame["average_speed_kmh"].unique().to_list()):
+        for capacity in sorted(frame["vehicle_capacity"].unique().to_list()):
+            subset = frame.filter(
+                (pl.col("average_speed_kmh") == speed) & (pl.col("vehicle_capacity") == capacity)
+            ).sort("max_actions_per_decision")
+            rows = subset.to_dicts()
+            for previous, current in zip(rows, rows[1:], strict=False):
+                additional_distance = round(
+                    current["relocation_distance_km"] - previous["relocation_distance_km"],
+                    3,
+                )
+                additional_failures_avoided = previous["failed_rentals"] - current["failed_rentals"]
+                records.append(
+                    {
+                        "average_speed_kmh": speed,
+                        "vehicle_capacity": capacity,
+                        "from_actions": previous["max_actions_per_decision"],
+                        "to_actions": current["max_actions_per_decision"],
+                        "additional_failures_avoided": additional_failures_avoided,
+                        "additional_distance_km": additional_distance,
+                        "additional_vehicle_minutes": round(
+                            current["relocation_vehicle_minutes"]
+                            - previous["relocation_vehicle_minutes"],
+                            3,
+                        ),
+                        "additional_failures_avoided_per_100km": round(
+                            100 * _rate(additional_failures_avoided, additional_distance),
+                            3,
+                        ),
+                    }
+                )
+    return tuple(records)
+
+
+def _render_sensitivity_markdown(experiment: SensitivityExperiment) -> str:
+    rows = "\n".join(
+        "| {actions} | {capacity} | {speed:.0f} | {service:.2%} | {failed:,} | "
+        "{empty:,.1f} | {distance:,.1f} | {minutes:,.1f} | {efficiency:,.1f} |".format(
+            actions=row["max_actions_per_decision"],
+            capacity=row["vehicle_capacity"],
+            speed=row["average_speed_kmh"],
+            service=row["service_rate"],
+            failed=row["failed_rentals"],
+            empty=row["empty_station_hours"],
+            distance=row["relocation_distance_km"],
+            minutes=row["relocation_vehicle_minutes"],
+            efficiency=row["failures_avoided_per_100km"],
+        )
+        for row in experiment.runs
+    )
+    marginal_rows = "\n".join(
+        "| {speed:.0f} | {capacity} | {before}→{after} | {avoided:+,} | "
+        "{distance:+,.1f} | {minutes:+,.1f} | {efficiency:,.1f} |".format(
+            speed=row["average_speed_kmh"],
+            capacity=row["vehicle_capacity"],
+            before=row["from_actions"],
+            after=row["to_actions"],
+            avoided=row["additional_failures_avoided"],
+            distance=row["additional_distance_km"],
+            minutes=row["additional_vehicle_minutes"],
+            efficiency=row["additional_failures_avoided_per_100km"],
+        )
+        for row in experiment.marginal_actions
+    )
+    service = experiment.service_best
+    empty_best = experiment.empty_time_best
+    efficiency = experiment.distance_efficiency_best
+    reference = experiment.default_scenario
+    baseline = experiment.baseline
+    factors = experiment.factors
+    findings = experiment.factor_findings
+    limitations = "\n".join(f"- {item}" for item in experiment.limitations)
+    failed_values = [row["failed_rentals"] for row in experiment.runs]
+    service_values = [row["service_rate"] for row in experiment.runs]
+    empty_values = [row["empty_station_hours"] for row in experiment.runs]
+    return f"""# 강남구 P2 공간 재배치 민감도 분석
+
+## 결론
+
+- 18개 운영 조합의 성공률 범위: {min(service_values):.2%}~{max(service_values):.2%}
+- 실패 범위: {min(failed_values):,}~{max(failed_values):,}건
+- 빈 대여소 누적 시간 범위: {min(empty_values):,.1f}~{max(empty_values):,.1f}시간
+- 서비스 최상: 시간당 {service["max_actions_per_decision"]}회, 적재
+  {service["equivalent_vehicle_capacities"]}대, {service["average_speed_kmh"]:.0f}km/h
+  (성공률 {service["service_rate"]:.2%}, 실패 {service["failed_rentals"]:,}건)
+- 빈 시간 최소: 시간당 {empty_best["max_actions_per_decision"]}회, 적재
+  {empty_best["equivalent_vehicle_capacities"]}대,
+  {empty_best["average_speed_kmh"]:.0f}km/h
+  ({empty_best["empty_station_hours"]:,.1f}시간, 실패 {empty_best["failed_rentals"]:,}건)
+- 거리 효율 최상: 시간당 {efficiency["max_actions_per_decision"]}회, 적재
+  {efficiency["vehicle_capacity"]}대, {efficiency["average_speed_kmh"]:.0f}km/h
+  (100km당 방지 실패 {efficiency["failures_avoided_per_100km"]:,.1f}건)
+- 기존 P2 기준값(2회·20대·15km/h): 성공률 {reference["service_rate"]:.2%},
+  실패 {reference["failed_rentals"]:,}건
+
+서비스 최상과 거리 효율 최상은 별도로 제시했다. 인건비·차량비 단가가 없으므로 임의의
+가중 종합점수나 ‘최적 차량 수’는 산출하지 않는다.
+
+## 요인별 발견
+
+- 시간당 운송 횟수에 따른 동일 속도·적재 내 최대 실패 차이:
+  {findings["max_failed_rental_spread_from_actions"]:,}건
+- 속도에 따른 동일 운송 횟수·적재 내 최대 실패 차이:
+  {findings["max_failed_rental_spread_from_speed"]:,}건
+- 적재량에 따른 동일 운송 횟수·속도 내 최대 실패 차이:
+  {findings["max_failed_rental_spread_from_capacity"]:,}건
+- 적재량 제약이 작동하지 않은 이유: {findings["capacity_non_binding_reason"]}
+
+따라서 이 실험 범위에서는 적재량보다 시간당 직접 운송 횟수가 성과 변동을 더 크게
+설명한다. 다만 이는 인과적 요인 중요도가 아니라 선택한 18개 조합 안의 관측 범위다.
+
+## 실험 계약
+
+- 방법: `{experiment.method}`
+- 검증 구간: `{experiment.evaluation_window}`
+- 동일 비교 대여소: {experiment.stations}개
+- 좌표 미확보 제외 ID: {", ".join(experiment.excluded_station_ids) or "없음"}
+- P0 기준: 요청 {baseline["observed_requests"]:,}건, 성공률
+  {baseline["service_rate"]:.2%}, 실패 {baseline["failed_rentals"]:,}건
+- 판단 주기: {factors["decision_interval_minutes"]}분
+- 시간당 직접 운송: {factors["max_direct_trips_per_decision"]}
+- 평균속도(km/h): {factors["average_speed_kmh"]}
+- 차량 적재량(대): {factors["vehicle_capacity"]}
+- 조합 전체를 수용하는 시나리오 이동 상한: 시간당
+  {factors["scenario_max_bikes_per_decision"]}대
+- 임계값 하한·목표·상한: {factors["lower_target_upper_thresholds"]}
+- 거리: Haversine 직선거리 × {factors["road_distance_factor"]}
+- 상하차: 자전거당 {factors["handling_minutes_per_bike"]:.2f}분
+
+## 18개 조합 결과
+
+| 시간당 운송 | 적재 | 속도 | 성공률 | 실패 | 빈 시간 | 거리(km) | 차량분 | 100km당 방지 실패 |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+{rows}
+
+## 직접 운송 횟수 추가의 한계효과
+
+양수 ‘추가 방지 실패’는 운송 횟수 증가로 실패가 감소했다는 뜻이다. 이 표는 동일 속도와
+적재량 안에서만 비교한다.
+
+| 속도 | 적재 | 시간당 운송 | 추가 방지 실패 | 추가 거리(km) | 추가 차량분 | \
+추가 100km당 방지 실패 |
+|---:|---:|---:|---:|---:|---:|---:|
+{marginal_rows}
+
+## 불변조건
+
+- 모든 조합은 같은 {experiment.stations}개 대여소, 초기 재고, 관측 요청 순서를 사용한다.
+- 성공 + 실패 = 전체 요청이며 재배치 중 자전거를 포함한 보존식 잔차는 0이다.
+- 각 조합의 판단 시점별 작업 수와 작업당 적재량은 해당 요인값을 넘지 않는다.
+
+## 해석 제한
+
+{limitations}
+
+## 다음 단계
+
+1. 날짜별로 P0와 대표 P2 조합을 재실행해 특정 요일에 치우친 결과인지 확인한다.
+2. 일별 효과 분포와 부트스트랩 신뢰구간으로 시간적 강건성을 측정한다.
+3. 그 뒤에만 비용 단가를 입력받아 운영비 대비 서비스 개선을 비교한다.
+"""
+
+
 def _render_markdown(experiment: SimulationExperiment) -> str:
     training_rows = "\n".join(
         "| {candidate} | {lower} | {target} | {upper} | {service:.2%} | {failed:,} | "
@@ -1358,6 +1792,81 @@ P1은 이동을 즉시 완료하는 낙관적 상한이고, P2는 거리와 직�
 2. 차량 수·속도·적재량 민감도 분석으로 결과 범위를 제시한다.
 3. 관측되지 않은 잠재 수요를 낮음·기준·높음 시나리오로 확장한다.
 """
+
+
+def _plot_spatial_sensitivity(frame: pl.DataFrame, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    capacities = sorted(frame["vehicle_capacity"].unique().to_list())
+    speeds = sorted(frame["average_speed_kmh"].unique().to_list())
+    panel_count = len(capacities) + 2
+    columns = 2
+    rows = math.ceil(panel_count / columns)
+    malgun_path = Path("C:/Windows/Fonts/malgun.ttf")
+    font_family = "DejaVu Sans"
+    if malgun_path.exists():
+        font_manager.fontManager.addfont(str(malgun_path))
+        font_family = font_manager.FontProperties(fname=str(malgun_path)).get_name()
+    colors = plt.get_cmap("viridis").resampled(max(len(speeds), 2))
+    with plt.rc_context({"font.family": font_family}):
+        figure, axes = plt.subplots(rows, columns, figsize=(14, 5.2 * rows), squeeze=False)
+        flat_axes = axes.flat
+        for capacity, axis in zip(capacities, flat_axes, strict=False):
+            for index, speed in enumerate(speeds):
+                subset = frame.filter(
+                    (pl.col("vehicle_capacity") == capacity)
+                    & (pl.col("average_speed_kmh") == speed)
+                ).sort("max_actions_per_decision")
+                axis.plot(
+                    subset["max_actions_per_decision"].to_list(),
+                    subset["failed_rentals"].to_list(),
+                    marker="o",
+                    linewidth=2,
+                    color=colors(index),
+                    label=f"{speed:g}km/h",
+                )
+            axis.set_title(f"적재 {capacity}대: 시간당 운송과 실패")
+            axis.set_xlabel("시간당 최대 직접 운송(회)")
+            axis.set_ylabel("실패 대여(건)")
+            axis.set_xticks(sorted(frame["max_actions_per_decision"].unique().to_list()))
+            axis.grid(alpha=0.2)
+            axis.legend()
+
+        distance_axis = axes.flat[len(capacities)]
+        action_values = frame["max_actions_per_decision"].to_list()
+        scatter = distance_axis.scatter(
+            frame["relocation_distance_km"].to_list(),
+            frame["failed_rentals"].to_list(),
+            c=action_values,
+            cmap="plasma",
+            s=[45 + capacity * 2 for capacity in frame["vehicle_capacity"].to_list()],
+            alpha=0.8,
+        )
+        distance_axis.set_title("서비스-거리 상충관계")
+        distance_axis.set_xlabel("재배치 거리(km)")
+        distance_axis.set_ylabel("실패 대여(건, 낮을수록 좋음)")
+        distance_axis.grid(alpha=0.2)
+        colorbar = figure.colorbar(scatter, ax=distance_axis)
+        colorbar.set_label("시간당 직접 운송(회)")
+
+        time_axis = axes.flat[len(capacities) + 1]
+        time_axis.scatter(
+            frame["relocation_vehicle_minutes"].to_list(),
+            frame["failed_rentals"].to_list(),
+            c=action_values,
+            cmap="plasma",
+            s=[45 + capacity * 2 for capacity in frame["vehicle_capacity"].to_list()],
+            alpha=0.8,
+        )
+        time_axis.set_title("서비스-차량시간 상충관계")
+        time_axis.set_xlabel("차량시간(분)")
+        time_axis.set_ylabel("실패 대여(건, 낮을수록 좋음)")
+        time_axis.grid(alpha=0.2)
+        for axis in axes.flat[panel_count:]:
+            axis.set_visible(False)
+        figure.suptitle("강남구 P2 공간 재배치 운영 가정 민감도")
+        figure.tight_layout()
+        figure.savefig(path, dpi=160)
+        plt.close(figure)
 
 
 def _plot_spatial_comparison(frame: pl.DataFrame, path: Path) -> None:
