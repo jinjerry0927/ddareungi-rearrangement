@@ -23,7 +23,12 @@ from ddareungi_rearrangement.pilot_analysis import (
     write_pilot_reports,
 )
 from ddareungi_rearrangement.seoul_api import SeoulOpenDataClient, SeoulOpenDataError
-from ddareungi_rearrangement.simulation import SimulationError, build_policy_comparison
+from ddareungi_rearrangement.simulation import (
+    SimulationError,
+    build_policy_comparison,
+    build_spatial_policy_comparison,
+    snapshot_actionable_coordinates,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -197,6 +202,65 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("reports/gangnam_2025_11_simulation.md"),
     )
+    coordinate_parser = subparsers.add_parser(
+        "snapshot-coordinates",
+        help="실시간 API에서 분석 대상 대여소 좌표 스냅샷을 생성합니다.",
+    )
+    coordinate_parser.add_argument("--page-size", type=int, default=1_000)
+    coordinate_parser.add_argument("--max-pages", type=int, default=10)
+    coordinate_parser.add_argument(
+        "--station-hour-file",
+        type=Path,
+        default=Path("data/processed/gangnam_2025_11_station_hour.parquet"),
+    )
+    coordinate_parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("data/sample/gangnam_station_coordinates_2026_08_20.csv"),
+    )
+    spatial_parser = subparsers.add_parser(
+        "run-spatial-simulation",
+        help="동일 대여소에서 P0/P1과 거리·시간 기반 P2를 비교합니다.",
+    )
+    spatial_parser.add_argument(
+        "--trips-file",
+        type=Path,
+        default=Path("data/processed/gangnam_2025_11_trips.parquet"),
+    )
+    spatial_parser.add_argument(
+        "--station-hour-file",
+        type=Path,
+        default=Path("data/processed/gangnam_2025_11_station_hour.parquet"),
+    )
+    spatial_parser.add_argument(
+        "--coordinate-file",
+        type=Path,
+        default=Path("data/sample/gangnam_station_coordinates_2026_08_20.csv"),
+    )
+    spatial_parser.add_argument("--evaluation-start", default="2025-11-24")
+    spatial_parser.add_argument("--evaluation-end", default="2025-11-29")
+    spatial_parser.add_argument("--decision-interval-minutes", type=int, default=60)
+    spatial_parser.add_argument("--max-bikes-per-decision", type=int, default=40)
+    spatial_parser.add_argument(
+        "--comparison-output",
+        type=Path,
+        default=Path("reports/data/gangnam_2025_11_spatial_policy_comparison.csv"),
+    )
+    spatial_parser.add_argument(
+        "--figure-output",
+        type=Path,
+        default=Path("reports/figures/gangnam_2025_11_spatial_policy_comparison.png"),
+    )
+    spatial_parser.add_argument(
+        "--json-output",
+        type=Path,
+        default=Path("reports/gangnam_2025_11_spatial_simulation.json"),
+    )
+    spatial_parser.add_argument(
+        "--markdown-output",
+        type=Path,
+        default=Path("reports/gangnam_2025_11_spatial_simulation.md"),
+    )
     return parser
 
 
@@ -315,6 +379,56 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"Pilot baseline: {baseline.month} {baseline.borough}")
         print(f"Scoped trips: {baseline.scoped_trips:,}")
         print(f"Empty station-hour rate: {baseline.empty_station_hour_rate:.2%}")
+        print(f"Report: {args.markdown_output}")
+        return 0
+    if args.command == "snapshot-coordinates":
+        try:
+            with SeoulOpenDataClient.from_env() as client:
+                pages = list(
+                    client.iter_all_live_bike_pages(
+                        page_size=args.page_size,
+                        max_pages=args.max_pages,
+                    )
+                )
+            snapshot = snapshot_actionable_coordinates(
+                pages,
+                station_hour_path=args.station_hour_file,
+                output_path=args.output,
+            )
+        except (SeoulOpenDataError, SimulationError, ValueError, OSError) as exc:
+            print(f"Coordinate snapshot failed: {exc}")
+            return 1
+
+        print(
+            f"Coordinate coverage: {snapshot.matched_stations}/{snapshot.requested_stations} "
+            f"({snapshot.coverage_rate:.2%})"
+        )
+        print(f"Missing station IDs: {', '.join(snapshot.missing_station_ids) or 'none'}")
+        print(f"Output: {snapshot.output_file}")
+        return 0
+    if args.command == "run-spatial-simulation":
+        try:
+            experiment = build_spatial_policy_comparison(
+                trips_path=args.trips_file,
+                station_hour_path=args.station_hour_file,
+                coordinate_path=args.coordinate_file,
+                evaluation_start=datetime.fromisoformat(args.evaluation_start),
+                evaluation_end=datetime.fromisoformat(args.evaluation_end),
+                decision_interval_minutes=args.decision_interval_minutes,
+                max_bikes_per_decision=args.max_bikes_per_decision,
+                comparison_csv_path=args.comparison_output,
+                figure_path=args.figure_output,
+                json_path=args.json_output,
+                markdown_path=args.markdown_output,
+            )
+        except (SimulationError, ValueError, OSError) as exc:
+            print(f"Spatial simulation failed: {exc}")
+            return 1
+
+        p2 = experiment.comparisons["greedy_nearest"]
+        print(f"Spatial comparison stations: {experiment.stations}")
+        print(f"P2 failures avoided vs P0: {p2['failures_avoided_vs_p0']:,.0f}")
+        print(f"P2 additional failures vs P1: {p2['additional_failures_vs_p1']:,.0f}")
         print(f"Report: {args.markdown_output}")
         return 0
     if args.command == "run-simulation":
