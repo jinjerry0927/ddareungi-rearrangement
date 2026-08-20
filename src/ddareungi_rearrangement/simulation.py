@@ -4,9 +4,11 @@ import heapq
 import json
 import math
 import re
+from bisect import bisect_left
 from dataclasses import asdict, dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from statistics import median
 from typing import Any, Protocol
 
 import matplotlib
@@ -293,6 +295,7 @@ class SimulationMetrics:
 class SimulationRun:
     metrics: SimulationMetrics
     station_metrics: pl.DataFrame
+    event_trace: pl.DataFrame | None = None
 
 
 @dataclass(frozen=True)
@@ -394,6 +397,20 @@ class StationEquityExperiment:
     policy_runs: tuple[dict[str, Any], ...]
     equity_summaries: dict[str, dict[str, Any]]
     station_results: tuple[dict[str, Any], ...]
+    limitations: tuple[str, ...]
+    output_files: dict[str, str]
+
+
+@dataclass(frozen=True)
+class HarmTraceExperiment:
+    generated_at_utc: str
+    method: str
+    evaluation_window: str
+    stations: int
+    policies: dict[str, dict[str, Any]]
+    policy_runs: tuple[dict[str, Any], ...]
+    transition_summaries: dict[str, dict[str, Any]]
+    harm_requests: tuple[dict[str, Any], ...]
     limitations: tuple[str, ...]
     output_files: dict[str, str]
 
@@ -656,7 +673,12 @@ def build_replay_scenario(
     )
 
 
-def simulate_replay(scenario: ReplayScenario, policy: RelocationPolicy) -> SimulationRun:
+def simulate_replay(
+    scenario: ReplayScenario,
+    policy: RelocationPolicy,
+    *,
+    collect_trace: bool = False,
+) -> SimulationRun:
     config = scenario.config
     inventory = dict(scenario.initial_inventory)
     empty_since: dict[str, datetime | None] = {
@@ -683,6 +705,44 @@ def simulate_replay(scenario: ReplayScenario, policy: RelocationPolicy) -> Simul
     unconditional_returns = 0
     successful_internal_returns = 0
     outbound_departures = 0
+    trace_records: list[dict[str, Any]] = []
+    trace_sequence = 0
+
+    def record_trace(
+        *,
+        timestamp: datetime,
+        event_kind: str,
+        station_id: str,
+        counterparty_station_id: str | None = None,
+        trip_id: int | None = None,
+        bike_count: int = 0,
+        inventory_before: int,
+        inventory_after: int,
+        rental_outcome: str | None = None,
+        distance_km: float = 0.0,
+        travel_minutes: float = 0.0,
+    ) -> None:
+        nonlocal trace_sequence
+        if not collect_trace:
+            return
+        trace_records.append(
+            {
+                "policy_name": policy.name,
+                "timestamp": timestamp,
+                "trace_sequence": trace_sequence,
+                "event_kind": event_kind,
+                "station_id": station_id,
+                "counterparty_station_id": counterparty_station_id,
+                "trip_id": trip_id,
+                "bike_count": bike_count,
+                "inventory_before": inventory_before,
+                "inventory_after": inventory_after,
+                "rental_outcome": rental_outcome,
+                "distance_km": distance_km,
+                "travel_minutes": travel_minutes,
+            }
+        )
+        trace_sequence += 1
 
     def change_inventory(station_id: str, delta: int, timestamp: datetime) -> None:
         before = inventory[station_id]
@@ -709,17 +769,47 @@ def simulate_replay(scenario: ReplayScenario, policy: RelocationPolicy) -> Simul
         if event.timestamp >= config.end:
             break
         if event.kind == "relocation_arrival":
+            inventory_before = inventory[event.station_id]
             change_inventory(event.station_id, event.bike_count, event.timestamp)
             relocated_in[event.station_id] += event.bike_count
             relocation_bikes_in_transit -= event.bike_count
+            record_trace(
+                timestamp=event.timestamp,
+                event_kind="relocation_in",
+                station_id=event.station_id,
+                counterparty_station_id=event.destination_id,
+                bike_count=event.bike_count,
+                inventory_before=inventory_before,
+                inventory_after=inventory[event.station_id],
+            )
         elif event.kind == "unconditional_return":
+            inventory_before = inventory[event.station_id]
             change_inventory(event.station_id, 1, event.timestamp)
             unconditional_returns += 1
+            record_trace(
+                timestamp=event.timestamp,
+                event_kind="unconditional_return",
+                station_id=event.station_id,
+                trip_id=event.trip_id,
+                bike_count=1,
+                inventory_before=inventory_before,
+                inventory_after=inventory[event.station_id],
+            )
         elif event.kind == "conditional_return":
             if event.trip_id in active_internal_trips:
+                inventory_before = inventory[event.station_id]
                 change_inventory(event.station_id, 1, event.timestamp)
                 active_internal_trips.remove(event.trip_id)
                 successful_internal_returns += 1
+                record_trace(
+                    timestamp=event.timestamp,
+                    event_kind="conditional_return",
+                    station_id=event.station_id,
+                    trip_id=event.trip_id,
+                    bike_count=1,
+                    inventory_before=inventory_before,
+                    inventory_after=inventory[event.station_id],
+                )
         elif event.kind == "decision":
             decision_epochs += 1
             transfers = policy.plan(
@@ -744,19 +834,43 @@ def simulate_replay(scenario: ReplayScenario, policy: RelocationPolicy) -> Simul
                     or transfer.to_station_id not in inventory
                 ):
                     raise SimulationError("운영 대상 밖 대여소가 재배치에 포함됐습니다")
+                donor_inventory_before = inventory[transfer.from_station_id]
                 change_inventory(
                     transfer.from_station_id,
                     -transfer.bike_count,
                     event.timestamp,
                 )
                 relocated_out[transfer.from_station_id] += transfer.bike_count
+                record_trace(
+                    timestamp=event.timestamp,
+                    event_kind="relocation_out",
+                    station_id=transfer.from_station_id,
+                    counterparty_station_id=transfer.to_station_id,
+                    bike_count=transfer.bike_count,
+                    inventory_before=donor_inventory_before,
+                    inventory_after=inventory[transfer.from_station_id],
+                    distance_km=transfer.distance_km,
+                    travel_minutes=transfer.travel_minutes,
+                )
                 if transfer.travel_minutes == 0:
+                    receiver_inventory_before = inventory[transfer.to_station_id]
                     change_inventory(
                         transfer.to_station_id,
                         transfer.bike_count,
                         event.timestamp,
                     )
                     relocated_in[transfer.to_station_id] += transfer.bike_count
+                    record_trace(
+                        timestamp=event.timestamp,
+                        event_kind="relocation_in",
+                        station_id=transfer.to_station_id,
+                        counterparty_station_id=transfer.from_station_id,
+                        bike_count=transfer.bike_count,
+                        inventory_before=receiver_inventory_before,
+                        inventory_after=inventory[transfer.to_station_id],
+                        distance_km=transfer.distance_km,
+                        travel_minutes=transfer.travel_minutes,
+                    )
                 else:
                     arrival_at = event.timestamp + timedelta(minutes=transfer.travel_minutes)
                     relocation_bikes_in_transit += transfer.bike_count
@@ -767,6 +881,7 @@ def simulate_replay(scenario: ReplayScenario, policy: RelocationPolicy) -> Simul
                             sequence=next_sequence,
                             kind="relocation_arrival",
                             station_id=transfer.to_station_id,
+                            destination_id=transfer.from_station_id,
                             bike_count=transfer.bike_count,
                         )
                         heapq.heappush(
@@ -787,12 +902,35 @@ def simulate_replay(scenario: ReplayScenario, policy: RelocationPolicy) -> Simul
         elif event.kind == "rental":
             observed_requests += 1
             requests[event.station_id] += 1
+            inventory_before = inventory[event.station_id]
             if inventory[event.station_id] == 0:
                 failed_rentals += 1
+                record_trace(
+                    timestamp=event.timestamp,
+                    event_kind="rental",
+                    station_id=event.station_id,
+                    counterparty_station_id=event.destination_id,
+                    trip_id=event.trip_id,
+                    bike_count=1,
+                    inventory_before=inventory_before,
+                    inventory_after=inventory_before,
+                    rental_outcome="failed",
+                )
                 continue
             change_inventory(event.station_id, -1, event.timestamp)
             successful_rentals += 1
             successes[event.station_id] += 1
+            record_trace(
+                timestamp=event.timestamp,
+                event_kind="rental",
+                station_id=event.station_id,
+                counterparty_station_id=event.destination_id,
+                trip_id=event.trip_id,
+                bike_count=1,
+                inventory_before=inventory_before,
+                inventory_after=inventory[event.station_id],
+                rental_outcome="successful",
+            )
             if event.destination_id is None:
                 outbound_departures += 1
             elif event.trip_id is not None:
@@ -887,7 +1025,26 @@ def simulate_replay(scenario: ReplayScenario, policy: RelocationPolicy) -> Simul
         worst_station_name=str(worst["station_name"]),
         worst_station_service_rate=float(worst["service_rate"]),
     )
-    return SimulationRun(metrics=metrics, station_metrics=station_metrics)
+    event_trace = None
+    if collect_trace:
+        event_trace = pl.DataFrame(
+            trace_records,
+            schema_overrides={
+                "timestamp": pl.Datetime,
+                "trace_sequence": pl.Int64,
+                "trip_id": pl.Int64,
+                "bike_count": pl.Int64,
+                "inventory_before": pl.Int64,
+                "inventory_after": pl.Int64,
+                "distance_km": pl.Float64,
+                "travel_minutes": pl.Float64,
+            },
+        ).sort("timestamp", "trace_sequence")
+    return SimulationRun(
+        metrics=metrics,
+        station_metrics=station_metrics,
+        event_trace=event_trace,
+    )
 
 
 def build_policy_comparison(
@@ -2097,6 +2254,400 @@ def _summarize_station_equity(
     return summaries
 
 
+def run_request_transition_trace(
+    scenario: ReplayScenario,
+    coordinates: dict[str, tuple[float, float]],
+) -> tuple[
+    pl.DataFrame,
+    dict[str, dict[str, Any]],
+    tuple[tuple[str, SimulationRun], ...],
+]:
+    if set(scenario.initial_inventory) != set(coordinates):
+        raise SimulationError("요청 전환 추적 시나리오와 좌표 대여소 범위가 다릅니다")
+    policies: tuple[tuple[str, RelocationPolicy], ...] = (
+        ("P0 재배치 없음", NoRelocationPolicy()),
+        (
+            "P2 기존 2회·15km/h",
+            GreedyNearestPolicy(
+                coordinates=coordinates,
+                max_actions_per_decision=2,
+                vehicle_capacity=20,
+                average_speed_kmh=15.0,
+                name="greedy_default",
+            ),
+        ),
+        (
+            "P2 서비스 3회·20km/h",
+            GreedyNearestPolicy(
+                coordinates=coordinates,
+                max_actions_per_decision=3,
+                vehicle_capacity=10,
+                average_speed_kmh=20.0,
+                name="greedy_service",
+            ),
+        ),
+    )
+    runs = tuple(
+        (label, simulate_replay(scenario, policy, collect_trace=True)) for label, policy in policies
+    )
+    if any(run.event_trace is None for _, run in runs):
+        raise SimulationError("요청 전환 추적 이벤트가 생성되지 않았습니다")
+    baseline_run = runs[0][1]
+    baseline_rentals = baseline_run.event_trace.filter(  # type: ignore[union-attr]
+        pl.col("event_kind") == "rental"
+    ).select(
+        "trip_id",
+        pl.col("timestamp").alias("request_at"),
+        "station_id",
+        pl.col("rental_outcome").alias("p0_outcome"),
+        pl.col("inventory_before").alias("p0_inventory_before"),
+    )
+    baseline_station_failures = {
+        str(row["station_id"]): int(row["failed_rentals"])
+        for row in baseline_run.station_metrics.iter_rows(named=True)
+    }
+    harm_records: list[dict[str, Any]] = []
+    summaries: dict[str, dict[str, Any]] = {}
+    for label, run in runs[1:]:
+        trace = run.event_trace
+        if trace is None:
+            raise SimulationError(f"{run.metrics.policy_name} trace가 없습니다")
+        policy_rentals = trace.filter(pl.col("event_kind") == "rental").select(
+            "trip_id",
+            pl.col("timestamp").alias("policy_request_at"),
+            pl.col("station_id").alias("policy_station_id"),
+            pl.col("rental_outcome").alias("policy_outcome"),
+            pl.col("inventory_before").alias("policy_inventory_before"),
+        )
+        transitions = baseline_rentals.join(
+            policy_rentals,
+            on="trip_id",
+            how="inner",
+            validate="1:1",
+        )
+        if transitions.height != baseline_rentals.height:
+            raise SimulationError(f"{run.metrics.policy_name} 요청 trace 행 수가 P0와 다릅니다")
+        if not (
+            (transitions["request_at"] == transitions["policy_request_at"]).all()
+            and (transitions["station_id"] == transitions["policy_station_id"]).all()
+        ):
+            raise SimulationError(f"{run.metrics.policy_name} 요청 trace 키가 P0와 다릅니다")
+        rescued = transitions.filter(
+            (pl.col("p0_outcome") == "failed") & (pl.col("policy_outcome") == "successful")
+        )
+        harmed = transitions.filter(
+            (pl.col("p0_outcome") == "successful") & (pl.col("policy_outcome") == "failed")
+        )
+        net_failures_avoided = baseline_run.metrics.failed_rentals - run.metrics.failed_rentals
+        if rescued.height - harmed.height != net_failures_avoided:
+            raise SimulationError(f"{run.metrics.policy_name} rescue-harm 재조정이 맞지 않습니다")
+
+        relocation_out = trace.filter(pl.col("event_kind") == "relocation_out").sort(
+            "station_id", "timestamp", "trace_sequence"
+        )
+        out_by_station: dict[str, list[dict[str, Any]]] = {}
+        for row in relocation_out.iter_rows(named=True):
+            out_by_station.setdefault(str(row["station_id"]), []).append(row)
+        policy_station_failures = {
+            str(row["station_id"]): int(row["failed_rentals"])
+            for row in run.station_metrics.iter_rows(named=True)
+        }
+        policy_harm_records: list[dict[str, Any]] = []
+        for row in harmed.iter_rows(named=True):
+            station_id = str(row["station_id"])
+            request_at = row["request_at"]
+            station_outs = out_by_station.get(station_id, [])
+            out_times = [item["timestamp"] for item in station_outs]
+            prior_index = bisect_left(out_times, request_at) - 1
+            prior = station_outs[prior_index] if prior_index >= 0 else None
+            minutes_since_out = (
+                round((request_at - prior["timestamp"]).total_seconds() / 60, 3)
+                if prior is not None
+                else None
+            )
+            net_station_avoided = (
+                baseline_station_failures[station_id] - policy_station_failures[station_id]
+            )
+            record = {
+                "policy_name": run.metrics.policy_name,
+                "policy_label": label,
+                "trip_id": int(row["trip_id"]),
+                "request_at": request_at.isoformat(),
+                "station_id": station_id,
+                "station_name": scenario.station_names[station_id],
+                "p0_inventory_before": int(row["p0_inventory_before"]),
+                "policy_inventory_before": int(row["policy_inventory_before"]),
+                "station_net_failures_avoided_vs_p0": net_station_avoided,
+                "station_net_status": (
+                    "improved"
+                    if net_station_avoided > 0
+                    else "worsened"
+                    if net_station_avoided < 0
+                    else "tied"
+                ),
+                "has_prior_relocation_out": prior is not None,
+                "prior_relocation_out_at": (
+                    prior["timestamp"].isoformat() if prior is not None else None
+                ),
+                "minutes_since_prior_out": minutes_since_out,
+                "within_60_minutes_of_prior_out": (
+                    minutes_since_out is not None and minutes_since_out <= 60
+                ),
+                "prior_out_bikes": int(prior["bike_count"]) if prior is not None else None,
+                "prior_out_inventory_before": (
+                    int(prior["inventory_before"]) if prior is not None else None
+                ),
+                "prior_out_inventory_after": (
+                    int(prior["inventory_after"]) if prior is not None else None
+                ),
+                "prior_out_destination_id": (
+                    str(prior["counterparty_station_id"]) if prior is not None else None
+                ),
+            }
+            policy_harm_records.append(record)
+            harm_records.append(record)
+        linked_records = [
+            record for record in policy_harm_records if record["has_prior_relocation_out"]
+        ]
+        within_60 = [
+            record for record in policy_harm_records if record["within_60_minutes_of_prior_out"]
+        ]
+        linked_minutes = sorted(
+            float(record["minutes_since_prior_out"]) for record in linked_records
+        )
+        station_counts: dict[tuple[str, str], int] = {}
+        for record in policy_harm_records:
+            key = (str(record["station_id"]), str(record["station_name"]))
+            station_counts[key] = station_counts.get(key, 0) + 1
+        top_harm_stations = tuple(
+            {
+                "station_id": station_id,
+                "station_name": station_name,
+                "harm_requests": count,
+                "net_failures_avoided_vs_p0": (
+                    baseline_station_failures[station_id] - policy_station_failures[station_id]
+                ),
+            }
+            for (station_id, station_name), count in sorted(
+                station_counts.items(),
+                key=lambda item: (-item[1], item[0][0]),
+            )[:10]
+        )
+        summaries[run.metrics.policy_name] = {
+            "observed_requests": transitions.height,
+            "rescued_requests": rescued.height,
+            "harmed_requests": harmed.height,
+            "net_failures_avoided": net_failures_avoided,
+            "reconciliation_residual": rescued.height - harmed.height - net_failures_avoided,
+            "harm_with_prior_relocation_out": len(linked_records),
+            "harm_without_prior_relocation_out": harmed.height - len(linked_records),
+            "prior_out_link_rate": _rate(len(linked_records), harmed.height),
+            "harm_within_60_minutes_of_prior_out": len(within_60),
+            "within_60_minutes_rate_of_harm": _rate(len(within_60), harmed.height),
+            "median_minutes_since_prior_out": (
+                round(median(linked_minutes), 3) if linked_minutes else None
+            ),
+            "harm_at_net_worsened_stations": sum(
+                record["station_net_status"] == "worsened" for record in policy_harm_records
+            ),
+            "harm_at_net_improved_stations": sum(
+                record["station_net_status"] == "improved" for record in policy_harm_records
+            ),
+            "top_harm_stations": top_harm_stations,
+        }
+    harm_frame = pl.DataFrame(harm_records).sort("policy_name", "request_at", "trip_id")
+    return harm_frame, summaries, runs
+
+
+def build_harm_trace(
+    *,
+    trips_path: Path,
+    station_hour_path: Path,
+    coordinate_path: Path,
+    evaluation_start: datetime,
+    evaluation_end: datetime,
+    harm_csv_path: Path,
+    figure_path: Path,
+    json_path: Path,
+    markdown_path: Path,
+) -> HarmTraceExperiment:
+    try:
+        trips = pl.read_parquet(trips_path)
+        station_hour = pl.read_parquet(station_hour_path)
+        coordinate_frame = pl.read_csv(
+            coordinate_path,
+            schema_overrides={"station_id": pl.String},
+        )
+    except (OSError, pl.exceptions.PolarsError) as exc:
+        raise SimulationError(f"요청 전환 추적 입력을 읽지 못했습니다: {exc}") from exc
+    required_coordinate_columns = {"station_id", "latitude", "longitude"}
+    missing_columns = required_coordinate_columns - set(coordinate_frame.columns)
+    if missing_columns:
+        raise SimulationError(f"좌표 필수 열 누락: {sorted(missing_columns)}")
+    if coordinate_frame["station_id"].n_unique() != coordinate_frame.height:
+        raise SimulationError("좌표 대여소 ID가 중복됐습니다")
+    coordinates = {
+        str(row["station_id"]): (float(row["latitude"]), float(row["longitude"]))
+        for row in coordinate_frame.iter_rows(named=True)
+    }
+    scenario = build_replay_scenario(
+        trips,
+        station_hour,
+        SimulationConfig(
+            start=evaluation_start,
+            end=evaluation_end,
+            decision_interval_minutes=60,
+            max_bikes_per_decision=40,
+        ),
+        eligible_station_ids=set(coordinates),
+    )
+    harm_frame, summaries, runs = run_request_transition_trace(scenario, coordinates)
+    harm_csv_path.parent.mkdir(parents=True, exist_ok=True)
+    harm_frame.write_csv(harm_csv_path)
+    _plot_harm_trace(harm_frame, summaries, figure_path)
+    output_files = {
+        "harm_requests": str(harm_csv_path),
+        "harm_trace_figure": str(figure_path),
+        "json_report": str(json_path),
+        "markdown_report": str(markdown_path),
+    }
+    experiment = HarmTraceExperiment(
+        generated_at_utc=datetime.now(UTC).isoformat(),
+        method="trip_id_counterfactual_transition_with_prior_outflow_trace",
+        evaluation_window=f"{evaluation_start.isoformat()} <= t < {evaluation_end.isoformat()}",
+        stations=len(coordinates),
+        policies={
+            "greedy_default": {"label": runs[1][0]},
+            "greedy_service": {"label": runs[2][0]},
+        },
+        policy_runs=tuple({"policy_label": label, **asdict(run.metrics)} for label, run in runs),
+        transition_summaries=summaries,
+        harm_requests=tuple(harm_frame.to_dicts()),
+        limitations=(
+            "선행 재배치 유출 연결은 시간적 연관이며 해당 요청 실패의 인과 증명이 아니다.",
+            "가장 최근 유출만 연결해 여러 차례 누적 유출과 네트워크 연쇄효과를 단순화한다.",
+            "60분 기준은 정책 판단 주기와 같다는 운영상 기준이며 최적 임계시간이 아니다.",
+            "공개 이력의 성공 요청만 재생해 미관측 잠재 수요 전환은 분석할 수 없다.",
+            "서비스 P2는 같은 홀드아웃에서 선택돼 독립 검증 결과가 아니다.",
+        ),
+        output_files=output_files,
+    )
+    json_path.parent.mkdir(parents=True, exist_ok=True)
+    markdown_path.parent.mkdir(parents=True, exist_ok=True)
+    json_path.write_text(
+        json.dumps(asdict(experiment), ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    markdown_path.write_text(_render_harm_trace_markdown(experiment), encoding="utf-8")
+    return experiment
+
+
+def _render_harm_trace_markdown(experiment: HarmTraceExperiment) -> str:
+    default = experiment.transition_summaries["greedy_default"]
+    service = experiment.transition_summaries["greedy_service"]
+    summary_rows = "\n".join(
+        "| {label} | {rescued:,} | {harmed:,} | {net:+,} | {linked:,} "
+        "({link_rate:.2%}) | {within:,} ({within_rate:.2%}) | {unlinked:,} | "
+        "{median_minutes:,.1f} |".format(
+            label=experiment.policies[policy_name]["label"],
+            rescued=summary["rescued_requests"],
+            harmed=summary["harmed_requests"],
+            net=summary["net_failures_avoided"],
+            linked=summary["harm_with_prior_relocation_out"],
+            link_rate=summary["prior_out_link_rate"],
+            within=summary["harm_within_60_minutes_of_prior_out"],
+            within_rate=summary["within_60_minutes_rate_of_harm"],
+            unlinked=summary["harm_without_prior_relocation_out"],
+            median_minutes=summary["median_minutes_since_prior_out"] or 0,
+        )
+        for policy_name, summary in (
+            ("greedy_default", default),
+            ("greedy_service", service),
+        )
+    )
+    top_rows = "\n".join(
+        "| {label} | {station_id} {station_name} | {harm:,} | {net:+,} |".format(
+            label=experiment.policies[policy_name]["label"],
+            station_id=row["station_id"],
+            station_name=row["station_name"],
+            harm=row["harm_requests"],
+            net=row["net_failures_avoided_vs_p0"],
+        )
+        for policy_name, summary in (
+            ("greedy_default", default),
+            ("greedy_service", service),
+        )
+        for row in summary["top_harm_stations"]
+    )
+    limitations = "\n".join(f"- {item}" for item in experiment.limitations)
+    return f"""# 강남구 P2 요청 단위 악화·구제 추적
+
+## 결론
+
+- 기존 P2: P0 실패→P2 성공 {default["rescued_requests"]:,}건,
+  P0 성공→P2 실패 {default["harmed_requests"]:,}건,
+  순 실패 방지 {default["net_failures_avoided"]:,}건
+- 서비스 P2: P0 실패→P2 성공 {service["rescued_requests"]:,}건,
+  P0 성공→P2 실패 {service["harmed_requests"]:,}건,
+  순 실패 방지 {service["net_failures_avoided"]:,}건
+- 악화 요청 중 같은 대여소의 선행 재배치 유출 연결률: 기존 P2
+  {default["prior_out_link_rate"]:.2%}, 서비스 P2 {service["prior_out_link_rate"]:.2%}
+- 악화 요청 중 선행 유출 60분 이내 비율: 기존 P2
+  {default["within_60_minutes_rate_of_harm"]:.2%}, 서비스 P2
+  {service["within_60_minutes_rate_of_harm"]:.2%}
+- 순악화 대여소에서 발생한 악화 요청: 기존 P2
+  {default["harm_at_net_worsened_stations"]:,}건, 서비스 P2
+  {service["harm_at_net_worsened_stations"]:,}건
+
+순개선은 `구제 요청 - 악화 요청`으로 재조정된다. 악화 요청 수는 순악화 건수보다 클 수
+있으며, 같은 대여소나 다른 대여소의 구제 요청이 이를 상쇄한다.
+
+## 실험 계약
+
+- 방법: `{experiment.method}`
+- 홀드아웃: `{experiment.evaluation_window}`
+- 동일 요청 키: 원본 정제 데이터의 `trip_id`
+- 구제: P0에서는 실패하고 P2에서는 성공한 같은 요청
+- 악화: P0에서는 성공하고 P2에서는 실패한 같은 요청
+- 선행 유출: 악화 요청 시각보다 이른 같은 대여소의 가장 최근 `relocation_out`
+- 60분 기준: 재배치 판단 주기와 동일한 운영 구간
+- 기본 시뮬레이션에서는 trace를 수집하지 않고 이 진단 실행에서만 활성화
+
+## 정책별 요청 전환과 선행 유출
+
+| 정책 | 구제 요청 | 악화 요청 | 순 방지 | 선행 유출 연결 | 60분 이내 | 미연결 | \
+유출 후 중앙시간(분) |
+|---|---:|---:|---:|---:|---:|---:|---:|
+{summary_rows}
+
+## 악화 요청 상위 대여소
+
+`순 실패 증감`이 양수면 그 대여소 전체로는 개선됐다는 뜻이다. 즉 수혜 대여소에서도
+일부 개별 요청은 P2 때문에 실패할 수 있다.
+
+| 정책 | 대여소 | 악화 요청 | 대여소 순 실패 감소 |
+|---|---|---:|---:|
+{top_rows}
+
+## 불변조건
+
+- 세 정책의 rental trace는 같은 trip ID·요청 시각·대여소를 사용한다.
+- 구제 요청 - 악화 요청 = 정책 전체 순 실패 방지다.
+- 기본 trace 비활성 실행과 활성 실행의 정책 전체 지표가 같다.
+- 성공 + 실패 = 전체 요청이며 자전거 보존식 잔차는 0이다.
+
+## 해석 제한
+
+{limitations}
+
+## 다음 단계
+
+1. 유출 직후보다 장시간 후 악화가 많다는 결과를 반영해 donor reserve 후보를 학습기간에서 비교한다.
+2. P3는 전체 성공률과 악화 요청 수를 가중합하지 않고 두 지표를 별도 제약으로 둔다.
+3. 후보를 고정한 뒤 홀드아웃에서 P2 대비 순개선·악화 요청·p10을 함께 검증한다.
+"""
+
+
 def _render_station_equity_markdown(experiment: StationEquityExperiment) -> str:
     default = experiment.equity_summaries["greedy_default"]
     service = experiment.equity_summaries["greedy_service"]
@@ -2689,6 +3240,140 @@ P1은 이동을 즉시 완료하는 낙관적 상한이고, P2는 거리와 직�
 2. 차량 수·속도·적재량 민감도 분석으로 결과 범위를 제시한다.
 3. 관측되지 않은 잠재 수요를 낮음·기준·높음 시나리오로 확장한다.
 """
+
+
+def _plot_harm_trace(
+    frame: pl.DataFrame,
+    summaries: dict[str, dict[str, Any]],
+    path: Path,
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    policy_names = ("greedy_default", "greedy_service")
+    policy_labels = ("기존 P2", "서비스 P2")
+    colors = ("#1f77b4", "#ff7f0e")
+    malgun_path = Path("C:/Windows/Fonts/malgun.ttf")
+    font_family = "DejaVu Sans"
+    if malgun_path.exists():
+        font_manager.fontManager.addfont(str(malgun_path))
+        font_family = font_manager.FontProperties(fname=str(malgun_path)).get_name()
+    with plt.rc_context({"font.family": font_family, "axes.unicode_minus": False}):
+        figure, axes = plt.subplots(2, 2, figsize=(15, 10))
+        x_values = list(range(len(policy_names)))
+        bar_width = 0.24
+        rescued = [summaries[name]["rescued_requests"] for name in policy_names]
+        harmed = [summaries[name]["harmed_requests"] for name in policy_names]
+        net = [summaries[name]["net_failures_avoided"] for name in policy_names]
+        axes[0, 0].bar(
+            [value - bar_width for value in x_values],
+            rescued,
+            width=bar_width,
+            label="구제",
+            color="#59a14f",
+        )
+        axes[0, 0].bar(
+            x_values,
+            harmed,
+            width=bar_width,
+            label="악화",
+            color="#e15759",
+        )
+        axes[0, 0].bar(
+            [value + bar_width for value in x_values],
+            net,
+            width=bar_width,
+            label="순 방지",
+            color="#4e79a7",
+        )
+        axes[0, 0].set_xticks(x_values, policy_labels)
+        axes[0, 0].set_title("동일 요청의 결과 전환")
+        axes[0, 0].set_ylabel("요청(건)")
+        axes[0, 0].grid(axis="y", alpha=0.2)
+        axes[0, 0].legend()
+
+        within = [summaries[name]["harm_within_60_minutes_of_prior_out"] for name in policy_names]
+        linked_after = [
+            summaries[name]["harm_with_prior_relocation_out"] - within[index]
+            for index, name in enumerate(policy_names)
+        ]
+        unlinked = [summaries[name]["harm_without_prior_relocation_out"] for name in policy_names]
+        axes[0, 1].bar(policy_labels, within, label="유출 후 60분 이내", color="#f28e2b")
+        axes[0, 1].bar(
+            policy_labels,
+            linked_after,
+            bottom=within,
+            label="유출 후 60분 초과",
+            color="#edc948",
+        )
+        axes[0, 1].bar(
+            policy_labels,
+            unlinked,
+            bottom=[first + second for first, second in zip(within, linked_after, strict=True)],
+            label="선행 유출 없음",
+            color="#bab0ac",
+        )
+        axes[0, 1].set_title("악화 요청과 가장 최근 선행 유출")
+        axes[0, 1].set_ylabel("악화 요청(건)")
+        axes[0, 1].grid(axis="y", alpha=0.2)
+        axes[0, 1].legend()
+
+        bin_edges = (0, 60, 180, 360, 720, 1_440, math.inf)
+        bin_labels = ("≤60", "1~3h", "3~6h", "6~12h", "12~24h", ">24h")
+        for index, (policy_name, label, color) in enumerate(
+            zip(policy_names, policy_labels, colors, strict=True)
+        ):
+            minutes = frame.filter(
+                (pl.col("policy_name") == policy_name)
+                & pl.col("minutes_since_prior_out").is_not_null()
+            )["minutes_since_prior_out"].to_list()
+            counts = [
+                sum(lower < value <= upper for value in minutes)
+                if lower > 0
+                else sum(lower <= value <= upper for value in minutes)
+                for lower, upper in zip(bin_edges, bin_edges[1:], strict=False)
+            ]
+            positions = [value + (index - 0.5) * 0.36 for value in range(len(bin_labels))]
+            axes[1, 0].bar(positions, counts, width=0.36, label=label, color=color)
+        axes[1, 0].set_xticks(range(len(bin_labels)), bin_labels)
+        axes[1, 0].set_title("악화 요청까지 선행 유출 경과시간")
+        axes[1, 0].set_xlabel("가장 최근 유출 후 경과")
+        axes[1, 0].set_ylabel("악화 요청(건)")
+        axes[1, 0].grid(axis="y", alpha=0.2)
+        axes[1, 0].legend()
+
+        station_counts: dict[tuple[str, str], dict[str, int]] = {}
+        for row in frame.iter_rows(named=True):
+            key = (str(row["station_id"]), str(row["station_name"]))
+            station_counts.setdefault(key, dict.fromkeys(policy_names, 0))
+            station_counts[key][str(row["policy_name"])] += 1
+        top_stations = sorted(
+            station_counts,
+            key=lambda key: (-sum(station_counts[key].values()), key[0]),
+        )[:10]
+        y_values = list(range(len(top_stations)))
+        for index, (policy_name, label, color) in enumerate(
+            zip(policy_names, policy_labels, colors, strict=True)
+        ):
+            positions = [value + (index - 0.5) * 0.36 for value in y_values]
+            axes[1, 1].barh(
+                positions,
+                [station_counts[key][policy_name] for key in top_stations],
+                height=0.36,
+                label=label,
+                color=color,
+            )
+        axes[1, 1].set_yticks(
+            y_values,
+            [f"{station_id} {station_name}" for station_id, station_name in top_stations],
+        )
+        axes[1, 1].invert_yaxis()
+        axes[1, 1].set_title("악화 요청 상위 대여소")
+        axes[1, 1].set_xlabel("악화 요청(건)")
+        axes[1, 1].grid(axis="x", alpha=0.2)
+        axes[1, 1].legend()
+        figure.suptitle("강남구 2025-11 홀드아웃: 요청 단위 악화·구제 추적")
+        figure.tight_layout()
+        figure.savefig(path, dpi=160)
+        plt.close(figure)
 
 
 def _plot_station_equity(

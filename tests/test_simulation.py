@@ -11,6 +11,7 @@ from ddareungi_rearrangement.simulation import (
     StaticThresholdPolicy,
     build_replay_scenario,
     run_daily_policy_comparison,
+    run_request_transition_trace,
     run_spatial_sensitivity,
     run_station_equity_comparison,
     simulate_replay,
@@ -348,4 +349,39 @@ def test_station_equity_comparison_preserves_requests_and_reconciles_failures() 
     assert frame["service_failed_rentals"].sum() == runs[2][1].metrics.failed_rentals
     assert frame["default_failures_avoided_vs_p0"].sum() == 1
     assert frame["service_failures_avoided_vs_p0"].sum() == 1
+    assert all(run.metrics.conservation_residual == 0 for _, run in runs)
+
+
+def test_harm_trace_links_p0_success_p2_failure_to_prior_donor_outflow() -> None:
+    start = datetime(2025, 11, 24)
+    end = datetime(2025, 11, 24, 1)
+    trips = pl.DataFrame(
+        {
+            "rent_at": [datetime(2025, 11, 24, 0, minute) for minute in range(5, 11)],
+            "return_at": [datetime(2025, 11, 24, 0, minute) for minute in range(30, 36)],
+            "rent_station_id": ["A"] * 6,
+            "return_station_id": ["OUT"] * 6,
+        }
+    )
+    scenario = build_replay_scenario(
+        trips,
+        _station_hour(start, bikes_a=10, bikes_b=0),
+        SimulationConfig(start=start, end=end, max_bikes_per_decision=40),
+    )
+    coordinates = {"A": (37.5, 127.0), "B": (37.5, 127.001)}
+
+    plain = simulate_replay(scenario, NoRelocationPolicy())
+    harm_frame, summaries, runs = run_request_transition_trace(scenario, coordinates)
+
+    assert plain.event_trace is None
+    assert harm_frame.height == 2
+    assert harm_frame["has_prior_relocation_out"].all()
+    assert harm_frame["within_60_minutes_of_prior_out"].all()
+    assert harm_frame["prior_out_bikes"].to_list() == [5, 5]
+    assert harm_frame["prior_out_inventory_after"].to_list() == [5, 5]
+    assert summaries["greedy_default"]["rescued_requests"] == 0
+    assert summaries["greedy_default"]["harmed_requests"] == 1
+    assert summaries["greedy_default"]["net_failures_avoided"] == -1
+    assert summaries["greedy_default"]["reconciliation_residual"] == 0
+    assert all(run.event_trace is not None for _, run in runs)
     assert all(run.metrics.conservation_residual == 0 for _, run in runs)

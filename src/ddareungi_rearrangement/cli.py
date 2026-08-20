@@ -25,6 +25,7 @@ from ddareungi_rearrangement.pilot_analysis import (
 from ddareungi_rearrangement.seoul_api import SeoulOpenDataClient, SeoulOpenDataError
 from ddareungi_rearrangement.simulation import (
     SimulationError,
+    build_harm_trace,
     build_policy_comparison,
     build_spatial_policy_comparison,
     build_spatial_sensitivity,
@@ -406,6 +407,47 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("reports/gangnam_2025_11_station_equity.md"),
     )
+    harm_parser = subparsers.add_parser(
+        "run-harm-trace",
+        help="P0 성공에서 P2 실패로 바뀐 요청과 선행 재배치 유출을 추적합니다.",
+    )
+    harm_parser.add_argument(
+        "--trips-file",
+        type=Path,
+        default=Path("data/processed/gangnam_2025_11_trips.parquet"),
+    )
+    harm_parser.add_argument(
+        "--station-hour-file",
+        type=Path,
+        default=Path("data/processed/gangnam_2025_11_station_hour.parquet"),
+    )
+    harm_parser.add_argument(
+        "--coordinate-file",
+        type=Path,
+        default=Path("data/sample/gangnam_station_coordinates_2026_08_20.csv"),
+    )
+    harm_parser.add_argument("--evaluation-start", default="2025-11-24")
+    harm_parser.add_argument("--evaluation-end", default="2025-11-29")
+    harm_parser.add_argument(
+        "--harm-output",
+        type=Path,
+        default=Path("reports/data/gangnam_2025_11_harm_trace.csv"),
+    )
+    harm_parser.add_argument(
+        "--figure-output",
+        type=Path,
+        default=Path("reports/figures/gangnam_2025_11_harm_trace.png"),
+    )
+    harm_parser.add_argument(
+        "--json-output",
+        type=Path,
+        default=Path("reports/gangnam_2025_11_harm_trace.json"),
+    )
+    harm_parser.add_argument(
+        "--markdown-output",
+        type=Path,
+        default=Path("reports/gangnam_2025_11_harm_trace.md"),
+    )
     return parser
 
 
@@ -686,6 +728,39 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"{service['stations_improved']}/"
             f"{service['stations_tied']}/"
             f"{service['stations_worsened']}"
+        )
+        print(f"Report: {args.markdown_output}")
+        return 0
+    if args.command == "run-harm-trace":
+        try:
+            experiment = build_harm_trace(
+                trips_path=args.trips_file,
+                station_hour_path=args.station_hour_file,
+                coordinate_path=args.coordinate_file,
+                evaluation_start=datetime.fromisoformat(args.evaluation_start),
+                evaluation_end=datetime.fromisoformat(args.evaluation_end),
+                harm_csv_path=args.harm_output,
+                figure_path=args.figure_output,
+                json_path=args.json_output,
+                markdown_path=args.markdown_output,
+            )
+        except (SimulationError, ValueError, OSError) as exc:
+            print(f"Harm trace simulation failed: {exc}")
+            return 1
+
+        default = experiment.transition_summaries["greedy_default"]
+        service = experiment.transition_summaries["greedy_service"]
+        print(
+            "P2 default rescued/harmed/net: "
+            f"{default['rescued_requests']}/"
+            f"{default['harmed_requests']}/"
+            f"{default['net_failures_avoided']}"
+        )
+        print(
+            "P2 service rescued/harmed/net: "
+            f"{service['rescued_requests']}/"
+            f"{service['harmed_requests']}/"
+            f"{service['net_failures_avoided']}"
         )
         print(f"Report: {args.markdown_output}")
         return 0
