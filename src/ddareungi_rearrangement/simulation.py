@@ -240,6 +240,93 @@ class GreedyNearestPolicy:
 
 
 @dataclass(frozen=True)
+class FleetExecutionConfig:
+    coordinates: dict[str, tuple[float, float]]
+    fleet_size: int
+    donor_reserve_bikes: int = 7
+    vehicle_capacity: int = 10
+    average_speed_kmh: float = 20.0
+    road_distance_factor: float = 1.3
+    handling_minutes_per_bike: float = 0.75
+    initial_station_ids: tuple[str, ...] | None = None
+
+    def __post_init__(self) -> None:
+        if self.fleet_size <= 0:
+            raise ValueError("fleet 차량 수는 양수여야 합니다")
+        if self.fleet_size > len(self.coordinates):
+            raise ValueError("fleet 차량 수는 좌표 대여소 수를 초과할 수 없습니다")
+        if self.donor_reserve_bikes < 0 or self.vehicle_capacity <= 0:
+            raise ValueError("공급지 보유 하한은 음수가 아니고 차량 용량은 양수여야 합니다")
+        if self.average_speed_kmh <= 0 or self.road_distance_factor < 1:
+            raise ValueError("차량 속도는 양수이고 거리 보정계수는 1 이상이어야 합니다")
+        if self.handling_minutes_per_bike < 0:
+            raise ValueError("상하차 시간은 음수일 수 없습니다")
+        if self.initial_station_ids is not None:
+            if len(self.initial_station_ids) != self.fleet_size:
+                raise ValueError("초기 차량 위치 수는 fleet 차량 수와 같아야 합니다")
+            missing = set(self.initial_station_ids) - set(self.coordinates)
+            if missing:
+                raise ValueError(f"초기 차량 위치 좌표 누락: {', '.join(sorted(missing))}")
+
+
+@dataclass
+class _FleetVehicleState:
+    vehicle_id: str
+    station_id: str
+    status: str = "idle"
+    busy_started_at: datetime | None = None
+    busy_minutes: float = 0.0
+    jobs_dispatched: int = 0
+    jobs_completed: int = 0
+    jobs_cancelled: int = 0
+    current_job_id: int | None = None
+
+
+def select_greedy_medoids(
+    coordinates: dict[str, tuple[float, float]],
+    count: int,
+) -> tuple[str, ...]:
+    if not coordinates:
+        raise ValueError("medoid 선택에는 하나 이상의 좌표가 필요합니다")
+    if not 1 <= count <= len(coordinates):
+        raise ValueError("medoid 수는 1 이상 좌표 수 이하여야 합니다")
+    station_ids = sorted(coordinates)
+    distances = {
+        (origin, destination): _haversine_km(
+            coordinates[origin],
+            coordinates[destination],
+        )
+        for origin in station_ids
+        for destination in station_ids
+    }
+    first = min(
+        station_ids,
+        key=lambda candidate: (
+            sum(distances[(station_id, candidate)] for station_id in station_ids),
+            candidate,
+        ),
+    )
+    selected = [first]
+    nearest = {station_id: distances[(station_id, first)] for station_id in station_ids}
+    while len(selected) < count:
+        candidate = min(
+            (station_id for station_id in station_ids if station_id not in selected),
+            key=lambda station_id: (
+                sum(
+                    min(nearest[origin], distances[(origin, station_id)]) for origin in station_ids
+                ),
+                station_id,
+            ),
+        )
+        selected.append(candidate)
+        nearest = {
+            station_id: min(nearest[station_id], distances[(station_id, candidate)])
+            for station_id in station_ids
+        }
+    return tuple(selected)
+
+
+@dataclass(frozen=True)
 class ReplayEvent:
     timestamp: datetime
     priority: int
@@ -249,6 +336,11 @@ class ReplayEvent:
     destination_id: str | None = None
     trip_id: int | None = None
     bike_count: int = 0
+    vehicle_id: str | None = None
+    job_id: int | None = None
+    batch_id: int | None = None
+    distance_km: float = 0.0
+    travel_minutes: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -297,10 +389,37 @@ class SimulationMetrics:
 
 
 @dataclass(frozen=True)
+class FleetExecutionMetrics:
+    fleet_size: int
+    initial_station_strategy: str
+    initial_station_ids: tuple[str, ...]
+    transfer_intents: int
+    intended_bikes: int
+    jobs_dispatched: int
+    dispatched_planned_bikes: int
+    jobs_cancelled_no_vehicle: int
+    undispatched_intent_bikes: int
+    jobs_cancelled_no_surplus: int
+    picked_up_bikes: int
+    pickup_shortfall_bikes: int
+    approach_distance_km: float
+    loaded_distance_km: float
+    total_vehicle_distance_km: float
+    approach_minutes: float
+    loaded_minutes: float
+    handling_minutes: float
+    busy_minutes: float
+    utilization_rate: float
+    vehicles_busy_at_end: int
+    vehicle_summaries: tuple[dict[str, Any], ...]
+
+
+@dataclass(frozen=True)
 class SimulationRun:
     metrics: SimulationMetrics
     station_metrics: pl.DataFrame
     event_trace: pl.DataFrame | None = None
+    fleet_metrics: FleetExecutionMetrics | None = None
 
 
 @dataclass(frozen=True)
@@ -714,8 +833,27 @@ def simulate_replay(
     policy: RelocationPolicy,
     *,
     collect_trace: bool = False,
+    fleet_config: FleetExecutionConfig | None = None,
 ) -> SimulationRun:
     config = scenario.config
+    if fleet_config is not None:
+        if set(scenario.initial_inventory) != set(fleet_config.coordinates):
+            raise SimulationError("fleet 시나리오와 좌표 대여소 범위가 다릅니다")
+        if not isinstance(policy, GreedyNearestPolicy):
+            raise SimulationError("fleet 실행기는 GreedyNearestPolicy transfer intent만 지원합니다")
+        policy_reserve = policy.donor_reserve_bikes or policy.target_bikes
+        matching_parameters = (
+            policy.coordinates == fleet_config.coordinates
+            and policy_reserve == fleet_config.donor_reserve_bikes
+            and policy.vehicle_capacity == fleet_config.vehicle_capacity
+            and policy.average_speed_kmh == fleet_config.average_speed_kmh
+            and policy.road_distance_factor == fleet_config.road_distance_factor
+            and policy.handling_minutes_per_bike == fleet_config.handling_minutes_per_bike
+        )
+        if not matching_parameters:
+            raise SimulationError(
+                "fleet 실행 설정과 정책의 reserve·용량·속도·거리·처리시간이 다릅니다"
+            )
     inventory = dict(scenario.initial_inventory)
     empty_since: dict[str, datetime | None] = {
         station_id: config.start if bikes == 0 else None for station_id, bikes in inventory.items()
@@ -743,6 +881,40 @@ def simulate_replay(
     outbound_departures = 0
     trace_records: list[dict[str, Any]] = []
     trace_sequence = 0
+    fleet_initial_station_ids: tuple[str, ...] = ()
+    fleet_initial_strategy = "none"
+    fleet_vehicles: dict[str, _FleetVehicleState] = {}
+    transfer_intents = 0
+    intended_bikes = 0
+    jobs_dispatched = 0
+    dispatched_planned_bikes = 0
+    jobs_cancelled_no_vehicle = 0
+    undispatched_intent_bikes = 0
+    jobs_cancelled_no_surplus = 0
+    pickup_shortfall_bikes = 0
+    approach_distance_km = 0.0
+    approach_minutes = 0.0
+    loaded_minutes = 0.0
+    handling_minutes = 0.0
+    next_job_id = 0
+    bikes_by_batch: dict[int, int] = {}
+    if fleet_config is not None:
+        if fleet_config.initial_station_ids is None:
+            fleet_initial_station_ids = select_greedy_medoids(
+                fleet_config.coordinates,
+                fleet_config.fleet_size,
+            )
+            fleet_initial_strategy = "synthetic_strategic_staging"
+        else:
+            fleet_initial_station_ids = fleet_config.initial_station_ids
+            fleet_initial_strategy = "explicit_station_ids"
+        fleet_vehicles = {
+            f"V{index:02d}": _FleetVehicleState(
+                vehicle_id=f"V{index:02d}",
+                station_id=station_id,
+            )
+            for index, station_id in enumerate(fleet_initial_station_ids, start=1)
+        }
 
     def record_trace(
         *,
@@ -757,6 +929,8 @@ def simulate_replay(
         rental_outcome: str | None = None,
         distance_km: float = 0.0,
         travel_minutes: float = 0.0,
+        vehicle_id: str | None = None,
+        job_id: int | None = None,
     ) -> None:
         nonlocal trace_sequence
         if not collect_trace:
@@ -776,6 +950,8 @@ def simulate_replay(
                 "rental_outcome": rental_outcome,
                 "distance_km": distance_km,
                 "travel_minutes": travel_minutes,
+                "vehicle_id": vehicle_id,
+                "job_id": job_id,
             }
         )
         trace_sequence += 1
@@ -809,6 +985,22 @@ def simulate_replay(
             change_inventory(event.station_id, event.bike_count, event.timestamp)
             relocated_in[event.station_id] += event.bike_count
             relocation_bikes_in_transit -= event.bike_count
+            if event.vehicle_id is not None:
+                vehicle = fleet_vehicles[event.vehicle_id]
+                if (
+                    vehicle.status != "delivering"
+                    or vehicle.current_job_id != event.job_id
+                    or vehicle.busy_started_at is None
+                ):
+                    raise SimulationError("fleet 배송 도착 차량 상태가 일치하지 않습니다")
+                vehicle.busy_minutes += (
+                    event.timestamp - vehicle.busy_started_at
+                ).total_seconds() / 60
+                vehicle.station_id = event.station_id
+                vehicle.status = "idle"
+                vehicle.busy_started_at = None
+                vehicle.current_job_id = None
+                vehicle.jobs_completed += 1
             record_trace(
                 timestamp=event.timestamp,
                 event_kind="relocation_in",
@@ -817,6 +1009,113 @@ def simulate_replay(
                 bike_count=event.bike_count,
                 inventory_before=inventory_before,
                 inventory_after=inventory[event.station_id],
+                vehicle_id=event.vehicle_id,
+                job_id=event.job_id,
+            )
+        elif event.kind == "relocation_pickup":
+            if fleet_config is None or event.vehicle_id is None or event.job_id is None:
+                raise SimulationError("fleet 픽업 이벤트 설정이 누락됐습니다")
+            vehicle = fleet_vehicles[event.vehicle_id]
+            if (
+                vehicle.status != "approaching"
+                or vehicle.current_job_id != event.job_id
+                or vehicle.busy_started_at is None
+                or event.destination_id is None
+            ):
+                raise SimulationError("fleet 픽업 차량 상태가 일치하지 않습니다")
+            vehicle.station_id = event.station_id
+            available_surplus = max(
+                0,
+                inventory[event.station_id] - fleet_config.donor_reserve_bikes,
+            )
+            actual_bikes = min(
+                event.bike_count,
+                fleet_config.vehicle_capacity,
+                available_surplus,
+            )
+            pickup_shortfall_bikes += event.bike_count - actual_bikes
+            if actual_bikes == 0:
+                jobs_cancelled_no_surplus += 1
+                vehicle.busy_minutes += (
+                    event.timestamp - vehicle.busy_started_at
+                ).total_seconds() / 60
+                vehicle.status = "idle"
+                vehicle.busy_started_at = None
+                vehicle.current_job_id = None
+                vehicle.jobs_cancelled += 1
+                inventory_before = inventory[event.station_id]
+                record_trace(
+                    timestamp=event.timestamp,
+                    event_kind="relocation_pickup_cancelled",
+                    station_id=event.station_id,
+                    counterparty_station_id=event.destination_id,
+                    bike_count=0,
+                    inventory_before=inventory_before,
+                    inventory_after=inventory_before,
+                    rental_outcome="no_surplus",
+                    vehicle_id=event.vehicle_id,
+                    job_id=event.job_id,
+                )
+                continue
+            donor_inventory_before = inventory[event.station_id]
+            change_inventory(event.station_id, -actual_bikes, event.timestamp)
+            if inventory[event.station_id] < fleet_config.donor_reserve_bikes:
+                raise SimulationError("fleet 픽업 후 공급지 재고가 donor reserve 미만입니다")
+            relocated_out[event.station_id] += actual_bikes
+            loaded_drive_minutes = event.distance_km / fleet_config.average_speed_kmh * 60
+            job_handling_minutes = actual_bikes * fleet_config.handling_minutes_per_bike
+            delivery_minutes = loaded_drive_minutes + job_handling_minutes
+            record_trace(
+                timestamp=event.timestamp,
+                event_kind="relocation_out",
+                station_id=event.station_id,
+                counterparty_station_id=event.destination_id,
+                bike_count=actual_bikes,
+                inventory_before=donor_inventory_before,
+                inventory_after=inventory[event.station_id],
+                distance_km=event.distance_km,
+                travel_minutes=delivery_minutes,
+                vehicle_id=event.vehicle_id,
+                job_id=event.job_id,
+            )
+            arrival_at = event.timestamp + timedelta(minutes=delivery_minutes)
+            relocation_bikes_in_transit += actual_bikes
+            arrival_event = ReplayEvent(
+                timestamp=arrival_at,
+                priority=0,
+                sequence=next_sequence,
+                kind="relocation_arrival",
+                station_id=event.destination_id,
+                destination_id=event.station_id,
+                bike_count=actual_bikes,
+                vehicle_id=event.vehicle_id,
+                job_id=event.job_id,
+                batch_id=event.batch_id,
+            )
+            if arrival_at < config.end:
+                heapq.heappush(
+                    event_queue,
+                    (
+                        arrival_event.timestamp,
+                        arrival_event.priority,
+                        arrival_event.sequence,
+                        arrival_event,
+                    ),
+                )
+                next_sequence += 1
+            vehicle.status = "delivering"
+            relocation_actions += 1
+            bikes_moved += actual_bikes
+            relocation_distance_km += event.distance_km
+            relocation_vehicle_minutes += delivery_minutes
+            loaded_minutes += loaded_drive_minutes
+            handling_minutes += job_handling_minutes
+            if event.batch_id is None:
+                raise SimulationError("fleet 픽업 batch ID가 누락됐습니다")
+            bikes_by_batch[event.batch_id] = bikes_by_batch.get(event.batch_id, 0) + actual_bikes
+            max_bikes_moved_in_epoch = max(
+                max_bikes_moved_in_epoch,
+                bikes_by_batch[event.batch_id],
             )
         elif event.kind == "unconditional_return":
             inventory_before = inventory[event.station_id]
@@ -852,12 +1151,9 @@ def simulate_replay(
                 dict(inventory),
                 max_bikes=config.max_bikes_per_decision,
             )
-            moved_this_epoch = sum(transfer.bike_count for transfer in transfers)
-            if moved_this_epoch > config.max_bikes_per_decision:
+            intended_this_epoch = sum(transfer.bike_count for transfer in transfers)
+            if intended_this_epoch > config.max_bikes_per_decision:
                 raise SimulationError("정책이 판단 시점별 재배치 한도를 초과했습니다")
-            max_relocation_actions_in_epoch = max(max_relocation_actions_in_epoch, len(transfers))
-            if transfers:
-                relocation_batches += 1
             for transfer in transfers:
                 if transfer.bike_count <= 0:
                     raise SimulationError("재배치 대수는 양수여야 합니다")
@@ -870,71 +1166,169 @@ def simulate_replay(
                     or transfer.to_station_id not in inventory
                 ):
                     raise SimulationError("운영 대상 밖 대여소가 재배치에 포함됐습니다")
-                donor_inventory_before = inventory[transfer.from_station_id]
-                change_inventory(
-                    transfer.from_station_id,
-                    -transfer.bike_count,
-                    event.timestamp,
+            if fleet_config is None:
+                max_relocation_actions_in_epoch = max(
+                    max_relocation_actions_in_epoch,
+                    len(transfers),
                 )
-                relocated_out[transfer.from_station_id] += transfer.bike_count
-                record_trace(
-                    timestamp=event.timestamp,
-                    event_kind="relocation_out",
-                    station_id=transfer.from_station_id,
-                    counterparty_station_id=transfer.to_station_id,
-                    bike_count=transfer.bike_count,
-                    inventory_before=donor_inventory_before,
-                    inventory_after=inventory[transfer.from_station_id],
-                    distance_km=transfer.distance_km,
-                    travel_minutes=transfer.travel_minutes,
-                )
-                if transfer.travel_minutes == 0:
-                    receiver_inventory_before = inventory[transfer.to_station_id]
+                if transfers:
+                    relocation_batches += 1
+                for transfer in transfers:
+                    donor_inventory_before = inventory[transfer.from_station_id]
                     change_inventory(
-                        transfer.to_station_id,
-                        transfer.bike_count,
+                        transfer.from_station_id,
+                        -transfer.bike_count,
                         event.timestamp,
                     )
-                    relocated_in[transfer.to_station_id] += transfer.bike_count
+                    relocated_out[transfer.from_station_id] += transfer.bike_count
                     record_trace(
                         timestamp=event.timestamp,
-                        event_kind="relocation_in",
-                        station_id=transfer.to_station_id,
-                        counterparty_station_id=transfer.from_station_id,
+                        event_kind="relocation_out",
+                        station_id=transfer.from_station_id,
+                        counterparty_station_id=transfer.to_station_id,
                         bike_count=transfer.bike_count,
-                        inventory_before=receiver_inventory_before,
-                        inventory_after=inventory[transfer.to_station_id],
+                        inventory_before=donor_inventory_before,
+                        inventory_after=inventory[transfer.from_station_id],
                         distance_km=transfer.distance_km,
                         travel_minutes=transfer.travel_minutes,
                     )
-                else:
-                    arrival_at = event.timestamp + timedelta(minutes=transfer.travel_minutes)
-                    relocation_bikes_in_transit += transfer.bike_count
-                    if arrival_at < config.end:
-                        arrival_event = ReplayEvent(
-                            timestamp=arrival_at,
-                            priority=0,
-                            sequence=next_sequence,
-                            kind="relocation_arrival",
+                    if transfer.travel_minutes == 0:
+                        receiver_inventory_before = inventory[transfer.to_station_id]
+                        change_inventory(
+                            transfer.to_station_id,
+                            transfer.bike_count,
+                            event.timestamp,
+                        )
+                        relocated_in[transfer.to_station_id] += transfer.bike_count
+                        record_trace(
+                            timestamp=event.timestamp,
+                            event_kind="relocation_in",
                             station_id=transfer.to_station_id,
-                            destination_id=transfer.from_station_id,
+                            counterparty_station_id=transfer.from_station_id,
                             bike_count=transfer.bike_count,
+                            inventory_before=receiver_inventory_before,
+                            inventory_after=inventory[transfer.to_station_id],
+                            distance_km=transfer.distance_km,
+                            travel_minutes=transfer.travel_minutes,
                         )
-                        heapq.heappush(
-                            event_queue,
-                            (
-                                arrival_event.timestamp,
-                                arrival_event.priority,
-                                arrival_event.sequence,
-                                arrival_event,
+                    else:
+                        arrival_at = event.timestamp + timedelta(minutes=transfer.travel_minutes)
+                        relocation_bikes_in_transit += transfer.bike_count
+                        if arrival_at < config.end:
+                            arrival_event = ReplayEvent(
+                                timestamp=arrival_at,
+                                priority=0,
+                                sequence=next_sequence,
+                                kind="relocation_arrival",
+                                station_id=transfer.to_station_id,
+                                destination_id=transfer.from_station_id,
+                                bike_count=transfer.bike_count,
+                            )
+                            heapq.heappush(
+                                event_queue,
+                                (
+                                    arrival_event.timestamp,
+                                    arrival_event.priority,
+                                    arrival_event.sequence,
+                                    arrival_event,
+                                ),
+                            )
+                            next_sequence += 1
+                    relocation_actions += 1
+                    bikes_moved += transfer.bike_count
+                    relocation_distance_km += transfer.distance_km
+                    relocation_vehicle_minutes += transfer.travel_minutes
+                max_bikes_moved_in_epoch = max(
+                    max_bikes_moved_in_epoch,
+                    intended_this_epoch,
+                )
+            else:
+                transfer_intents += len(transfers)
+                intended_bikes += intended_this_epoch
+                idle_vehicles = sorted(
+                    (vehicle for vehicle in fleet_vehicles.values() if vehicle.status == "idle"),
+                    key=lambda vehicle: vehicle.vehicle_id,
+                )
+                dispatched_this_epoch = 0
+                for transfer in transfers:
+                    if not idle_vehicles:
+                        jobs_cancelled_no_vehicle += 1
+                        undispatched_intent_bikes += transfer.bike_count
+                        continue
+                    vehicle = min(
+                        idle_vehicles,
+                        key=lambda candidate: (
+                            _haversine_km(
+                                fleet_config.coordinates[candidate.station_id],
+                                fleet_config.coordinates[transfer.from_station_id],
                             ),
+                            candidate.vehicle_id,
+                        ),
+                    )
+                    idle_vehicles.remove(vehicle)
+                    approach_distance = (
+                        _haversine_km(
+                            fleet_config.coordinates[vehicle.station_id],
+                            fleet_config.coordinates[transfer.from_station_id],
                         )
-                        next_sequence += 1
-                relocation_actions += 1
-                bikes_moved += transfer.bike_count
-                relocation_distance_km += transfer.distance_km
-                relocation_vehicle_minutes += transfer.travel_minutes
-            max_bikes_moved_in_epoch = max(max_bikes_moved_in_epoch, moved_this_epoch)
+                        * fleet_config.road_distance_factor
+                    )
+                    job_approach_minutes = approach_distance / fleet_config.average_speed_kmh * 60
+                    job_id = next_job_id
+                    next_job_id += 1
+                    pickup_event = ReplayEvent(
+                        timestamp=event.timestamp + timedelta(minutes=job_approach_minutes),
+                        priority=0,
+                        sequence=next_sequence,
+                        kind="relocation_pickup",
+                        station_id=transfer.from_station_id,
+                        destination_id=transfer.to_station_id,
+                        bike_count=transfer.bike_count,
+                        vehicle_id=vehicle.vehicle_id,
+                        job_id=job_id,
+                        batch_id=decision_epochs,
+                        distance_km=transfer.distance_km,
+                        travel_minutes=job_approach_minutes,
+                    )
+                    heapq.heappush(
+                        event_queue,
+                        (
+                            pickup_event.timestamp,
+                            pickup_event.priority,
+                            pickup_event.sequence,
+                            pickup_event,
+                        ),
+                    )
+                    next_sequence += 1
+                    vehicle.status = "approaching"
+                    vehicle.busy_started_at = event.timestamp
+                    vehicle.current_job_id = job_id
+                    vehicle.jobs_dispatched += 1
+                    jobs_dispatched += 1
+                    dispatched_planned_bikes += transfer.bike_count
+                    dispatched_this_epoch += 1
+                    approach_distance_km += approach_distance
+                    approach_minutes += job_approach_minutes
+                    donor_inventory = inventory[transfer.from_station_id]
+                    record_trace(
+                        timestamp=event.timestamp,
+                        event_kind="vehicle_dispatch",
+                        station_id=transfer.from_station_id,
+                        counterparty_station_id=transfer.to_station_id,
+                        bike_count=transfer.bike_count,
+                        inventory_before=donor_inventory,
+                        inventory_after=donor_inventory,
+                        distance_km=approach_distance,
+                        travel_minutes=job_approach_minutes,
+                        vehicle_id=vehicle.vehicle_id,
+                        job_id=job_id,
+                    )
+                if dispatched_this_epoch:
+                    relocation_batches += 1
+                max_relocation_actions_in_epoch = max(
+                    max_relocation_actions_in_epoch,
+                    dispatched_this_epoch,
+                )
         elif event.kind == "rental":
             observed_requests += 1
             requests[event.station_id] += 1
@@ -1061,6 +1455,69 @@ def simulate_replay(
         worst_station_name=str(worst["station_name"]),
         worst_station_service_rate=float(worst["service_rate"]),
     )
+    fleet_metrics = None
+    if fleet_config is not None:
+        vehicle_summaries = []
+        total_busy_minutes = 0.0
+        for vehicle in sorted(
+            fleet_vehicles.values(),
+            key=lambda item: item.vehicle_id,
+        ):
+            active_busy_minutes = 0.0
+            if vehicle.busy_started_at is not None:
+                active_busy_minutes = (config.end - vehicle.busy_started_at).total_seconds() / 60
+            vehicle_total_busy = vehicle.busy_minutes + active_busy_minutes
+            total_busy_minutes += vehicle_total_busy
+            vehicle_summaries.append(
+                {
+                    "vehicle_id": vehicle.vehicle_id,
+                    "initial_station_id": fleet_initial_station_ids[
+                        int(vehicle.vehicle_id[1:]) - 1
+                    ],
+                    "final_station_id": vehicle.station_id,
+                    "status_at_end": vehicle.status,
+                    "busy_minutes": round(vehicle_total_busy, 3),
+                    "jobs_dispatched": vehicle.jobs_dispatched,
+                    "jobs_completed": vehicle.jobs_completed,
+                    "jobs_cancelled": vehicle.jobs_cancelled,
+                    "current_job_id": vehicle.current_job_id,
+                }
+            )
+        rounded_approach_distance = round(approach_distance_km, 3)
+        rounded_loaded_distance = round(relocation_distance_km, 3)
+        total_distance = round(
+            rounded_approach_distance + rounded_loaded_distance,
+            3,
+        )
+        fleet_metrics = FleetExecutionMetrics(
+            fleet_size=fleet_config.fleet_size,
+            initial_station_strategy=fleet_initial_strategy,
+            initial_station_ids=fleet_initial_station_ids,
+            transfer_intents=transfer_intents,
+            intended_bikes=intended_bikes,
+            jobs_dispatched=jobs_dispatched,
+            dispatched_planned_bikes=dispatched_planned_bikes,
+            jobs_cancelled_no_vehicle=jobs_cancelled_no_vehicle,
+            undispatched_intent_bikes=undispatched_intent_bikes,
+            jobs_cancelled_no_surplus=jobs_cancelled_no_surplus,
+            picked_up_bikes=bikes_moved,
+            pickup_shortfall_bikes=pickup_shortfall_bikes,
+            approach_distance_km=rounded_approach_distance,
+            loaded_distance_km=rounded_loaded_distance,
+            total_vehicle_distance_km=total_distance,
+            approach_minutes=round(approach_minutes, 3),
+            loaded_minutes=round(loaded_minutes, 3),
+            handling_minutes=round(handling_minutes, 3),
+            busy_minutes=round(total_busy_minutes, 3),
+            utilization_rate=_rate(
+                total_busy_minutes,
+                fleet_config.fleet_size * period_minutes,
+            ),
+            vehicles_busy_at_end=sum(
+                vehicle.status != "idle" for vehicle in fleet_vehicles.values()
+            ),
+            vehicle_summaries=tuple(vehicle_summaries),
+        )
     event_trace = None
     if collect_trace:
         event_trace = pl.DataFrame(
@@ -1074,12 +1531,15 @@ def simulate_replay(
                 "inventory_after": pl.Int64,
                 "distance_km": pl.Float64,
                 "travel_minutes": pl.Float64,
+                "vehicle_id": pl.String,
+                "job_id": pl.Int64,
             },
         ).sort("timestamp", "trace_sequence")
     return SimulationRun(
         metrics=metrics,
         station_metrics=station_metrics,
         event_trace=event_trace,
+        fleet_metrics=fleet_metrics,
     )
 
 

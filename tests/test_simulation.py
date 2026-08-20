@@ -1,10 +1,11 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import polars as pl
 
 from ddareungi_rearrangement.seoul_api import LiveBikePage
 from ddareungi_rearrangement.simulation import (
+    FleetExecutionConfig,
     GreedyNearestPolicy,
     NoRelocationPolicy,
     SimulationConfig,
@@ -16,6 +17,7 @@ from ddareungi_rearrangement.simulation import (
     run_request_transition_trace,
     run_spatial_sensitivity,
     run_station_equity_comparison,
+    select_greedy_medoids,
     simulate_replay,
     snapshot_actionable_coordinates,
 )
@@ -482,3 +484,264 @@ def test_donor_reserve_holdout_compares_only_frozen_policy_and_reconciles_trace(
     assert rows["P3"]["bikes_moved"] < rows["P2"]["bikes_moved"]
     assert all(row["transition_reconciliation_residual"] == 0 for row in rows.values())
     assert all(run.metrics.conservation_residual == 0 for run in runs)
+
+
+def test_greedy_medoids_are_deterministic_and_add_the_best_next_station() -> None:
+    coordinates = {
+        "C": (37.5, 127.02),
+        "A": (37.5, 127.0),
+        "B": (37.5, 127.01),
+    }
+
+    selected = select_greedy_medoids(coordinates, 2)
+
+    assert selected == ("B", "A")
+    assert select_greedy_medoids(dict(reversed(list(coordinates.items()))), 2) == selected
+
+
+def test_fleet_keeps_donor_inventory_until_pickup_and_uses_actual_surplus() -> None:
+    start = datetime(2025, 11, 24)
+    end = datetime(2025, 11, 24, 1)
+    station_hour = pl.DataFrame(
+        {
+            "timestamp": [start] * 3,
+            "station_id": ["A", "B", "C"],
+            "station_name": ["공급", "수요", "차량"],
+            "available_bikes": [10, 0, 5],
+            "inventory_observed": [True] * 3,
+            "actionable": [True] * 3,
+        }
+    )
+    trips = pl.DataFrame(
+        {
+            "rent_at": [datetime(2025, 11, 24, 0, 1)],
+            "return_at": [datetime(2025, 11, 24, 0, 30)],
+            "rent_station_id": ["A"],
+            "return_station_id": ["OUT"],
+        }
+    )
+    coordinates = {
+        "A": (37.5, 127.0),
+        "B": (37.5, 127.001),
+        "C": (37.5, 127.02),
+    }
+    scenario = build_replay_scenario(
+        trips,
+        station_hour,
+        SimulationConfig(start=start, end=end, max_bikes_per_decision=40),
+    )
+    policy = GreedyNearestPolicy(
+        coordinates=coordinates,
+        donor_reserve_bikes=7,
+        max_actions_per_decision=1,
+        vehicle_capacity=10,
+        average_speed_kmh=60,
+        road_distance_factor=1,
+        handling_minutes_per_bike=0,
+        name="protected",
+    )
+
+    run = simulate_replay(
+        scenario,
+        policy,
+        collect_trace=True,
+        fleet_config=FleetExecutionConfig(
+            coordinates=coordinates,
+            fleet_size=1,
+            donor_reserve_bikes=7,
+            vehicle_capacity=10,
+            average_speed_kmh=60,
+            road_distance_factor=1,
+            handling_minutes_per_bike=0,
+            initial_station_ids=("C",),
+        ),
+    )
+
+    assert run.event_trace is not None
+    assert run.fleet_metrics is not None
+    dispatch = run.event_trace.filter(pl.col("event_kind") == "vehicle_dispatch").row(0, named=True)
+    rental = run.event_trace.filter(pl.col("event_kind") == "rental").row(0, named=True)
+    pickup = run.event_trace.filter(pl.col("event_kind") == "relocation_out").row(0, named=True)
+    assert dispatch["inventory_before"] == dispatch["inventory_after"] == 10
+    assert rental["rental_outcome"] == "successful"
+    assert pickup["timestamp"] > rental["timestamp"]
+    assert pickup["bike_count"] == 2
+    assert pickup["inventory_after"] == 7
+    assert run.fleet_metrics.dispatched_planned_bikes == 3
+    assert run.fleet_metrics.picked_up_bikes == 2
+    assert run.fleet_metrics.pickup_shortfall_bikes == 1
+    assert run.fleet_metrics.approach_distance_km > run.fleet_metrics.loaded_distance_km
+    assert run.fleet_metrics.total_vehicle_distance_km == round(
+        run.fleet_metrics.approach_distance_km + run.fleet_metrics.loaded_distance_km,
+        3,
+    )
+    assert run.metrics.conservation_residual == 0
+
+
+def test_busy_fleet_skips_new_intents_without_overlapping_vehicle_jobs() -> None:
+    start = datetime(2025, 11, 24)
+    end = datetime(2025, 11, 24, 0, 5)
+    station_hour = pl.DataFrame(
+        {
+            "timestamp": [start] * 4,
+            "station_id": ["A", "B", "C", "D"],
+            "station_name": ["첫 공급", "먼 수요", "둘째 공급", "둘째 수요"],
+            "available_bikes": [10, 0, 5, 0],
+            "inventory_observed": [True] * 4,
+            "actionable": [True] * 4,
+        }
+    )
+    trips = pl.DataFrame(
+        {
+            "rent_at": [start - timedelta(hours=1)] * 4 + [datetime(2025, 11, 24, 0, 2)],
+            "return_at": [
+                datetime(2025, 11, 24, 0, 0, 30),
+                datetime(2025, 11, 24, 0, 0, 31),
+                datetime(2025, 11, 24, 0, 0, 32),
+                datetime(2025, 11, 24, 0, 0, 33),
+                datetime(2025, 11, 24, 0, 4),
+            ],
+            "rent_station_id": ["OUT"] * 4 + ["B"],
+            "return_station_id": ["C"] * 4 + ["OUT"],
+        }
+    )
+    coordinates = {
+        "A": (37.5, 127.0),
+        "B": (37.5, 127.1),
+        "C": (37.5, 127.2),
+        "D": (37.5, 127.201),
+    }
+    scenario = build_replay_scenario(
+        trips,
+        station_hour,
+        SimulationConfig(
+            start=start,
+            end=end,
+            decision_interval_minutes=1,
+            max_bikes_per_decision=40,
+        ),
+    )
+    policy = GreedyNearestPolicy(
+        coordinates=coordinates,
+        donor_reserve_bikes=7,
+        max_actions_per_decision=1,
+        vehicle_capacity=10,
+        average_speed_kmh=10,
+        road_distance_factor=1,
+        handling_minutes_per_bike=0,
+        name="protected_busy",
+    )
+
+    run = simulate_replay(
+        scenario,
+        policy,
+        collect_trace=True,
+        fleet_config=FleetExecutionConfig(
+            coordinates=coordinates,
+            fleet_size=1,
+            donor_reserve_bikes=7,
+            vehicle_capacity=10,
+            average_speed_kmh=10,
+            road_distance_factor=1,
+            handling_minutes_per_bike=0,
+            initial_station_ids=("A",),
+        ),
+    )
+
+    assert run.fleet_metrics is not None
+    assert run.fleet_metrics.jobs_dispatched == 1
+    assert run.fleet_metrics.jobs_cancelled_no_vehicle >= 1
+    assert run.fleet_metrics.vehicles_busy_at_end == 1
+    assert run.fleet_metrics.vehicle_summaries[0]["jobs_dispatched"] == 1
+    assert run.fleet_metrics.vehicle_summaries[0]["jobs_completed"] == 0
+    assert run.metrics.relocation_bikes_in_transit_at_end == 3
+    assert run.metrics.max_relocation_actions_in_epoch == 1
+    assert run.metrics.conservation_residual == 0
+
+
+def test_fleet_next_approach_starts_from_previous_delivery_station() -> None:
+    start = datetime(2025, 11, 24)
+    end = datetime(2025, 11, 24, 2)
+    station_hour = pl.DataFrame(
+        {
+            "timestamp": [start] * 4,
+            "station_id": ["A", "B", "C", "D"],
+            "station_name": ["첫 공급", "첫 수요", "둘째 공급", "둘째 수요"],
+            "available_bikes": [10, 0, 5, 0],
+            "inventory_observed": [True] * 4,
+            "actionable": [True] * 4,
+        }
+    )
+    trips = pl.DataFrame(
+        {
+            "rent_at": [start - timedelta(hours=1)] * 4 + [datetime(2025, 11, 24, 1, 5)],
+            "return_at": [
+                datetime(2025, 11, 24, 0, 30),
+                datetime(2025, 11, 24, 0, 31),
+                datetime(2025, 11, 24, 0, 32),
+                datetime(2025, 11, 24, 0, 33),
+                datetime(2025, 11, 24, 1, 30),
+            ],
+            "rent_station_id": ["OUT"] * 4 + ["D"],
+            "return_station_id": ["C"] * 4 + ["OUT"],
+        }
+    )
+    coordinates = {
+        "A": (37.5, 127.0),
+        "B": (37.5, 127.001),
+        "C": (37.5, 127.01),
+        "D": (37.5, 127.011),
+    }
+    scenario = build_replay_scenario(
+        trips,
+        station_hour,
+        SimulationConfig(
+            start=start,
+            end=end,
+            decision_interval_minutes=60,
+            max_bikes_per_decision=40,
+        ),
+    )
+    policy = GreedyNearestPolicy(
+        coordinates=coordinates,
+        donor_reserve_bikes=7,
+        max_actions_per_decision=1,
+        vehicle_capacity=10,
+        average_speed_kmh=60,
+        road_distance_factor=1,
+        handling_minutes_per_bike=0,
+        name="protected_continuous",
+    )
+
+    run = simulate_replay(
+        scenario,
+        policy,
+        collect_trace=True,
+        fleet_config=FleetExecutionConfig(
+            coordinates=coordinates,
+            fleet_size=1,
+            donor_reserve_bikes=7,
+            vehicle_capacity=10,
+            average_speed_kmh=60,
+            road_distance_factor=1,
+            handling_minutes_per_bike=0,
+            initial_station_ids=("A",),
+        ),
+    )
+
+    assert run.event_trace is not None
+    assert run.fleet_metrics is not None
+    dispatches = run.event_trace.filter(pl.col("event_kind") == "vehicle_dispatch").sort(
+        "timestamp"
+    )
+    assert dispatches.height == 2
+    assert dispatches["vehicle_id"].to_list() == ["V01", "V01"]
+    assert dispatches["station_id"].to_list() == ["A", "C"]
+    assert dispatches["distance_km"].to_list()[0] == 0
+    assert dispatches["distance_km"].to_list()[1] > 0
+    vehicle = run.fleet_metrics.vehicle_summaries[0]
+    assert vehicle["jobs_completed"] == 2
+    assert vehicle["final_station_id"] == "D"
+    assert vehicle["status_at_end"] == "idle"
+    assert run.metrics.failed_rentals == 0
+    assert run.metrics.conservation_residual == 0

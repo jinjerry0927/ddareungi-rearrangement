@@ -1,6 +1,6 @@
 # 프로젝트 상태
 
-- 단계: M10 차량 접근·연속 경로 모델 계약 설계
+- 단계: M11 fleet 실행기 핵심 구현·소형 검증
 - 상태: 완료
 - 기준일: 2026-08-20
 
@@ -117,16 +117,30 @@
 - 기존 보고서 P3 명칭과 계획의 Forecast P3 충돌을 확인하고 이후 보호형을 `P2-R`로 정리
 - 새 비교를 독립 검증이 아닌 `post_hoc_execution_model_sensitivity`로 제한
 - 차량 실행모델 상세 계약: `docs/VEHICLE_ROUTING_CONTRACT.md`
+- `FleetExecutionConfig`로 좌표·차량 수·reserve·용량·속도·거리·처리시간 계약 구현
+- 165개 좌표의 합성 초기 거점을 입력 순서와 무관하게 고르는 greedy medoids 구현
+- 기존 `simulate_replay` 기본 동작을 유지하고 `fleet_config`가 있을 때만 차량 이벤트 활성화
+- 차량별 idle·approaching·delivering 상태, 현재 위치, busy 시작, 작업 수 상태 구현
+- 배차 때 공급지 재고를 유지하고 접근 후 실제 reserve 7 초과분만 부분 픽업하도록 구현
+- 차량 접근 중 대여가 발생한 소형 반례에서 계획 3대 중 2대만 픽업하고 공급지 7대 유지
+- 장거리 배송 중인 차량이 다음 판단의 intent를 받지 않으며 busy 구간이 겹치지 않음을 확인
+- 배송 완료 수요처가 다음 공급지 접근의 출발점이 되는 연속 차량 위치 확인
+- 접근·적재·총거리, 시간 분해, 미배차·취소·부분 픽업, 차량 가동률 지표 구현
+- trace에 차량 dispatch·픽업 유출·배송 도착과 vehicle/job ID 추가
+- fleet·정책 좌표 및 reserve·용량·속도·거리·처리시간이 다르면 fail-closed 처리
+- 기존 25개 테스트 보존, fleet 소형 테스트 4개 추가로 pytest 29개 통과
+- 기존 즉시출발 홀드아웃을 별도 임시 출력으로 재실행해 3개 정책·16,205건 핵심 수치 동일 확인
+- 계약대로 165개 대여소·5일 fleet 실데이터는 아직 실행하지 않음
 
 ## 현재 목표
 
-차량 접근·연속 위치를 구현하기 전 정책·이벤트·합성 가정·평가 계약을 동결했다.
+fleet 접근·픽업·배송 핵심과 소형 불변조건을 구현했고 실데이터 실행 게이트를 통과했다.
 
 ## 다음 작업
 
-1. 소형 시나리오에서 접근·픽업·배송·차량 busy 중복 방지 테스트를 먼저 작성한다.
-2. 결정론적 greedy medoids와 fleet 1·2·3 상태를 기존 실행과 분리해 구현한다.
-3. 소형 불변조건이 통과한 뒤에만 5일 사후 운영모델 민감도를 실행한다.
+1. P0·기존 즉시출발 P2-R·fleet 1·2·3의 동일 요청 비교 실행기를 만든다.
+2. 165개·16,205건과 trace 재조정·보존식·거리 분해 불변조건을 검사한다.
+3. CSV·JSON·Markdown·PNG를 만든 뒤 `post_hoc_execution_model_sensitivity`로만 해석한다.
 
 ## 현재 데이터 리스크
 
@@ -178,7 +192,7 @@
 
 - Ruff lint: PASS
 - Ruff format: PASS
-- pytest: 25 passed
+- pytest: 29 passed
 - 프로젝트 환경 진단: PASS
 - API 키: 설정 확인, 값은 출력·보고서·Git에서 제외
 - 과거 데이터 감사: PASS_WITH_WARNINGS
@@ -194,6 +208,7 @@
 - P3 donor reserve 학습 Pareto 분석: PASS
 - P3 reserve 7 단일 홀드아웃 검증: PASS, 학습기간과 같은 절충 재현
 - 차량 접근·연속 경로 계약 감사: PASS, 구현 전 합성 가정·중단 조건 동결
+- fleet 실행기 소형 검증: PASS, 기존 25개 보존 + 신규 4개 통과
 
 ## 중단 규칙
 
