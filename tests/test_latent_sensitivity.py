@@ -83,6 +83,8 @@ def test_small_paired_batch_reuses_hashes_and_preserves_invariants() -> None:
     assert results.policy_runs.height == 12
     assert results.paired_runs.height == 6
     assert results.scenario_summary.height == 3
+    assert results.station_runs.height == 18
+    assert results.station_summary.height == 9
     assert (
         results.policy_runs.group_by("seed", "scenario")
         .agg(
@@ -100,6 +102,11 @@ def test_small_paired_batch_reuses_hashes_and_preserves_invariants() -> None:
     )
     assert results.policy_runs["total_conservation_residual"].to_list() == [0] * 12
     assert results.policy_runs["combined_trip_flow_residual"].to_list() == [0] * 12
+    assert (
+        results.station_runs.group_by("seed", "scenario", "request_source").len()["len"].to_list()
+        == [1] * 18
+    )
+    assert results.station_robustness["persistent_all_scenarios_count"] == 0
 
 
 def test_build_small_batch_writes_reproducible_artifacts(tmp_path: Path) -> None:
@@ -115,7 +122,10 @@ def test_build_small_batch_writes_reproducible_artifacts(tmp_path: Path) -> None
         "policy": tmp_path / "policy.csv",
         "paired": tmp_path / "paired.csv",
         "summary": tmp_path / "summary.csv",
+        "station_runs": tmp_path / "station_runs.parquet",
+        "station_summary": tmp_path / "station_summary.csv",
         "figure": tmp_path / "figure.png",
+        "station_figure": tmp_path / "station_figure.png",
         "json": tmp_path / "report.json",
         "markdown": tmp_path / "report.md",
     }
@@ -131,7 +141,10 @@ def test_build_small_batch_writes_reproducible_artifacts(tmp_path: Path) -> None
         policy_runs_csv_path=outputs["policy"],
         paired_runs_csv_path=outputs["paired"],
         summary_csv_path=outputs["summary"],
+        station_runs_parquet_path=outputs["station_runs"],
+        station_summary_csv_path=outputs["station_summary"],
         figure_path=outputs["figure"],
+        station_figure_path=outputs["station_figure"],
         json_path=outputs["json"],
         markdown_path=outputs["markdown"],
         seeds=(20251124, 20251125),
@@ -143,9 +156,13 @@ def test_build_small_batch_writes_reproducible_artifacts(tmp_path: Path) -> None
     assert pl.read_csv(outputs["policy"]).height == 12
     assert pl.read_csv(outputs["paired"]).height == 6
     assert pl.read_csv(outputs["summary"]).height == 3
+    assert pl.read_parquet(outputs["station_runs"]).height == 18
+    assert pl.read_csv(outputs["station_summary"]).height == 9
     assert outputs["figure"].stat().st_size > 0
+    assert outputs["station_figure"].stat().st_size > 0
     report = json.loads(outputs["json"].read_text(encoding="utf-8"))
     assert report["contract_version"] == "latent-demand-v2"
+    assert "station_robustness" in report
     assert report["stop_required"] is True
     assert "STOP_REQUIRED" in outputs["markdown"].read_text(encoding="utf-8")
 

@@ -630,9 +630,24 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path("reports/data/gangnam_2025_11_latent_summary.csv"),
     )
     latent_parser.add_argument(
+        "--station-runs-output",
+        type=Path,
+        default=Path("reports/data/gangnam_2025_11_latent_station_runs.parquet"),
+    )
+    latent_parser.add_argument(
+        "--station-summary-output",
+        type=Path,
+        default=Path("reports/data/gangnam_2025_11_latent_station_summary.csv"),
+    )
+    latent_parser.add_argument(
         "--figure-output",
         type=Path,
         default=Path("reports/figures/gangnam_2025_11_latent_sensitivity.png"),
+    )
+    latent_parser.add_argument(
+        "--station-figure-output",
+        type=Path,
+        default=Path("reports/figures/gangnam_2025_11_latent_station_robustness.png"),
     )
     latent_parser.add_argument(
         "--json-output",
@@ -1055,7 +1070,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 policy_runs_csv_path=args.policy_runs_output,
                 paired_runs_csv_path=args.paired_runs_output,
                 summary_csv_path=args.summary_output,
+                station_runs_parquet_path=args.station_runs_output,
+                station_summary_csv_path=args.station_summary_output,
                 figure_path=args.figure_output,
+                station_figure_path=args.station_figure_output,
                 json_path=args.json_output,
                 markdown_path=args.markdown_output,
             )

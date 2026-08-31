@@ -1,5 +1,5 @@
 {
-  "generated_at_utc": "2026-08-31T05:48:14.094132+00:00",
+  "generated_at_utc": "2026-08-31T06:01:24.938218+00:00",
   "method": "post_hoc_latent_demand_paired_sensitivity",
   "contract_version": "latent-demand-v2",
   "training_window": "2025-11-03T00:00:00 <= t < 2025-11-22T00:00:00",
@@ -172,6 +172,358 @@
       "stations_worsened_max": 24
     }
   ],
+  "station_robustness": {
+    "classification": {
+      "persistent_worsened": "worsening_probability >= 0.8",
+      "intermittent_worsened": "0 < worsening_probability < 0.8",
+      "never_worsened": "worsening_probability == 0"
+    },
+    "scenarios": {
+      "low": {
+        "persistent_worsened_stations": 8,
+        "intermittent_worsened_stations": 38,
+        "never_worsened_stations": 119,
+        "observed_baseline_worsened_stations": 12,
+        "persistent_observed_baseline_worsened": 7,
+        "new_worsening_stations": 34,
+        "persistent_new_worsening_stations": 1,
+        "top_worsened": [
+          {
+            "station_id": "3640",
+            "station_name": "일원1동주민센터앞 사거리",
+            "worsening_probability": 1.0,
+            "failures_avoided_mean": -10.96,
+            "failures_avoided_p10": -14,
+            "failures_avoided_p90": -8,
+            "observed_baseline_worsened": true,
+            "new_worsening_under_latent": false
+          },
+          {
+            "station_id": "4935",
+            "station_name": "도곡삼성래미안",
+            "worsening_probability": 1.0,
+            "failures_avoided_mean": -5.7,
+            "failures_avoided_p10": -7,
+            "failures_avoided_p90": -4,
+            "observed_baseline_worsened": true,
+            "new_worsening_under_latent": false
+          },
+          {
+            "station_id": "2416",
+            "station_name": "한티역 6번 출구",
+            "worsening_probability": 1.0,
+            "failures_avoided_mean": -4.24,
+            "failures_avoided_p10": -6,
+            "failures_avoided_p90": -2,
+            "observed_baseline_worsened": true,
+            "new_worsening_under_latent": false
+          },
+          {
+            "station_id": "2422",
+            "station_name": "수서동 성당 맞은편",
+            "worsening_probability": 1.0,
+            "failures_avoided_mean": -4.02,
+            "failures_avoided_p10": -6,
+            "failures_avoided_p90": -3,
+            "observed_baseline_worsened": true,
+            "new_worsening_under_latent": false
+          },
+          {
+            "station_id": "3609",
+            "station_name": "언주초등학교 입구",
+            "worsening_probability": 1.0,
+            "failures_avoided_mean": -3.08,
+            "failures_avoided_p10": -4,
+            "failures_avoided_p90": -2,
+            "observed_baseline_worsened": true,
+            "new_worsening_under_latent": false
+          },
+          {
+            "station_id": "2305",
+            "station_name": "MCM 본사 직영점 앞",
+            "worsening_probability": 1.0,
+            "failures_avoided_mean": -2.64,
+            "failures_avoided_p10": -4,
+            "failures_avoided_p90": -1,
+            "observed_baseline_worsened": true,
+            "new_worsening_under_latent": false
+          },
+          {
+            "station_id": "2409",
+            "station_name": "역삼동 디오슈페리움 (우성아파트 사거리)",
+            "worsening_probability": 0.94,
+            "failures_avoided_mean": -4.26,
+            "failures_avoided_p10": -8,
+            "failures_avoided_p90": -2,
+            "observed_baseline_worsened": true,
+            "new_worsening_under_latent": false
+          },
+          {
+            "station_id": "2387",
+            "station_name": "래미안강남힐즈 사거리",
+            "worsening_probability": 0.92,
+            "failures_avoided_mean": -3.12,
+            "failures_avoided_p10": -5,
+            "failures_avoided_p90": -1,
+            "observed_baseline_worsened": false,
+            "new_worsening_under_latent": true
+          },
+          {
+            "station_id": "2427",
+            "station_name": "개포고등학교 정문앞",
+            "worsening_probability": 0.78,
+            "failures_avoided_mean": -2.28,
+            "failures_avoided_p10": -6,
+            "failures_avoided_p90": 1,
+            "observed_baseline_worsened": true,
+            "new_worsening_under_latent": false
+          },
+          {
+            "station_id": "2327",
+            "station_name": "뱅뱅사거리 랜드마크타워 앞",
+            "worsening_probability": 0.62,
+            "failures_avoided_mean": -1.5,
+            "failures_avoided_p10": -4,
+            "failures_avoided_p90": 0,
+            "observed_baseline_worsened": false,
+            "new_worsening_under_latent": true
+          }
+        ]
+      },
+      "base": {
+        "persistent_worsened_stations": 8,
+        "intermittent_worsened_stations": 39,
+        "never_worsened_stations": 118,
+        "observed_baseline_worsened_stations": 12,
+        "persistent_observed_baseline_worsened": 8,
+        "new_worsening_stations": 35,
+        "persistent_new_worsening_stations": 0,
+        "top_worsened": [
+          {
+            "station_id": "3640",
+            "station_name": "일원1동주민센터앞 사거리",
+            "worsening_probability": 1.0,
+            "failures_avoided_mean": -10.6,
+            "failures_avoided_p10": -14,
+            "failures_avoided_p90": -8,
+            "observed_baseline_worsened": true,
+            "new_worsening_under_latent": false
+          },
+          {
+            "station_id": "4935",
+            "station_name": "도곡삼성래미안",
+            "worsening_probability": 1.0,
+            "failures_avoided_mean": -5.62,
+            "failures_avoided_p10": -8,
+            "failures_avoided_p90": -4,
+            "observed_baseline_worsened": true,
+            "new_worsening_under_latent": false
+          },
+          {
+            "station_id": "2409",
+            "station_name": "역삼동 디오슈페리움 (우성아파트 사거리)",
+            "worsening_probability": 1.0,
+            "failures_avoided_mean": -4.7,
+            "failures_avoided_p10": -8,
+            "failures_avoided_p90": -1,
+            "observed_baseline_worsened": true,
+            "new_worsening_under_latent": false
+          },
+          {
+            "station_id": "2422",
+            "station_name": "수서동 성당 맞은편",
+            "worsening_probability": 1.0,
+            "failures_avoided_mean": -4.02,
+            "failures_avoided_p10": -6,
+            "failures_avoided_p90": -3,
+            "observed_baseline_worsened": true,
+            "new_worsening_under_latent": false
+          },
+          {
+            "station_id": "2416",
+            "station_name": "한티역 6번 출구",
+            "worsening_probability": 1.0,
+            "failures_avoided_mean": -3.92,
+            "failures_avoided_p10": -6,
+            "failures_avoided_p90": -2,
+            "observed_baseline_worsened": true,
+            "new_worsening_under_latent": false
+          },
+          {
+            "station_id": "3609",
+            "station_name": "언주초등학교 입구",
+            "worsening_probability": 1.0,
+            "failures_avoided_mean": -3.0,
+            "failures_avoided_p10": -4,
+            "failures_avoided_p90": -2,
+            "observed_baseline_worsened": true,
+            "new_worsening_under_latent": false
+          },
+          {
+            "station_id": "2305",
+            "station_name": "MCM 본사 직영점 앞",
+            "worsening_probability": 1.0,
+            "failures_avoided_mean": -2.96,
+            "failures_avoided_p10": -4,
+            "failures_avoided_p90": -2,
+            "observed_baseline_worsened": true,
+            "new_worsening_under_latent": false
+          },
+          {
+            "station_id": "2427",
+            "station_name": "개포고등학교 정문앞",
+            "worsening_probability": 0.94,
+            "failures_avoided_mean": -2.74,
+            "failures_avoided_p10": -6,
+            "failures_avoided_p90": -1,
+            "observed_baseline_worsened": true,
+            "new_worsening_under_latent": false
+          },
+          {
+            "station_id": "2387",
+            "station_name": "래미안강남힐즈 사거리",
+            "worsening_probability": 0.74,
+            "failures_avoided_mean": -2.48,
+            "failures_avoided_p10": -6,
+            "failures_avoided_p90": 0,
+            "observed_baseline_worsened": false,
+            "new_worsening_under_latent": true
+          },
+          {
+            "station_id": "2327",
+            "station_name": "뱅뱅사거리 랜드마크타워 앞",
+            "worsening_probability": 0.64,
+            "failures_avoided_mean": -1.64,
+            "failures_avoided_p10": -4,
+            "failures_avoided_p90": 0,
+            "observed_baseline_worsened": false,
+            "new_worsening_under_latent": true
+          }
+        ]
+      },
+      "high": {
+        "persistent_worsened_stations": 8,
+        "intermittent_worsened_stations": 42,
+        "never_worsened_stations": 115,
+        "observed_baseline_worsened_stations": 12,
+        "persistent_observed_baseline_worsened": 7,
+        "new_worsening_stations": 38,
+        "persistent_new_worsening_stations": 1,
+        "top_worsened": [
+          {
+            "station_id": "3640",
+            "station_name": "일원1동주민센터앞 사거리",
+            "worsening_probability": 1.0,
+            "failures_avoided_mean": -10.46,
+            "failures_avoided_p10": -14,
+            "failures_avoided_p90": -7,
+            "observed_baseline_worsened": true,
+            "new_worsening_under_latent": false
+          },
+          {
+            "station_id": "4935",
+            "station_name": "도곡삼성래미안",
+            "worsening_probability": 1.0,
+            "failures_avoided_mean": -5.7,
+            "failures_avoided_p10": -7,
+            "failures_avoided_p90": -4,
+            "observed_baseline_worsened": true,
+            "new_worsening_under_latent": false
+          },
+          {
+            "station_id": "2422",
+            "station_name": "수서동 성당 맞은편",
+            "worsening_probability": 1.0,
+            "failures_avoided_mean": -3.46,
+            "failures_avoided_p10": -5,
+            "failures_avoided_p90": -2,
+            "observed_baseline_worsened": true,
+            "new_worsening_under_latent": false
+          },
+          {
+            "station_id": "2305",
+            "station_name": "MCM 본사 직영점 앞",
+            "worsening_probability": 1.0,
+            "failures_avoided_mean": -2.94,
+            "failures_avoided_p10": -4,
+            "failures_avoided_p90": -2,
+            "observed_baseline_worsened": true,
+            "new_worsening_under_latent": false
+          },
+          {
+            "station_id": "2416",
+            "station_name": "한티역 6번 출구",
+            "worsening_probability": 0.98,
+            "failures_avoided_mean": -3.72,
+            "failures_avoided_p10": -5,
+            "failures_avoided_p90": -2,
+            "observed_baseline_worsened": true,
+            "new_worsening_under_latent": false
+          },
+          {
+            "station_id": "3609",
+            "station_name": "언주초등학교 입구",
+            "worsening_probability": 0.94,
+            "failures_avoided_mean": -2.82,
+            "failures_avoided_p10": -4,
+            "failures_avoided_p90": -1,
+            "observed_baseline_worsened": true,
+            "new_worsening_under_latent": false
+          },
+          {
+            "station_id": "2409",
+            "station_name": "역삼동 디오슈페리움 (우성아파트 사거리)",
+            "worsening_probability": 0.92,
+            "failures_avoided_mean": -5.0,
+            "failures_avoided_p10": -9,
+            "failures_avoided_p90": -1,
+            "observed_baseline_worsened": true,
+            "new_worsening_under_latent": false
+          },
+          {
+            "station_id": "2387",
+            "station_name": "래미안강남힐즈 사거리",
+            "worsening_probability": 0.86,
+            "failures_avoided_mean": -3.46,
+            "failures_avoided_p10": -7,
+            "failures_avoided_p90": 0,
+            "observed_baseline_worsened": false,
+            "new_worsening_under_latent": true
+          },
+          {
+            "station_id": "2427",
+            "station_name": "개포고등학교 정문앞",
+            "worsening_probability": 0.78,
+            "failures_avoided_mean": -2.28,
+            "failures_avoided_p10": -6,
+            "failures_avoided_p90": 0,
+            "observed_baseline_worsened": true,
+            "new_worsening_under_latent": false
+          },
+          {
+            "station_id": "2308",
+            "station_name": "압구정파출소 앞",
+            "worsening_probability": 0.76,
+            "failures_avoided_mean": -1.84,
+            "failures_avoided_p10": -4,
+            "failures_avoided_p90": 0,
+            "observed_baseline_worsened": true,
+            "new_worsening_under_latent": false
+          }
+        ]
+      }
+    },
+    "persistent_all_scenarios_count": 7,
+    "persistent_all_scenarios_station_ids": [
+      "2305",
+      "2409",
+      "2416",
+      "2422",
+      "3609",
+      "3640",
+      "4935"
+    ]
+  },
   "stop_checks": {
     "policy_failure_direction_change": {
       "triggered": false,
@@ -222,13 +574,18 @@
     "인근 대여소로 이동한 대체수요와 이용자의 포기·검색 행동을 모델링하지 않는다.",
     "P2-R은 실제 차량 차고지·교통·교대가 없는 공급지 즉시출발 실행모델이다.",
     "같은 5일 홀드아웃이 앞선 정책·fleet 분석에도 사용됐다.",
-    "bootstrap 구간은 생성 seed 변동만 나타내며 모형 불확실성 전체를 포함하지 않는다."
+    "bootstrap 구간은 생성 seed 변동만 나타내며 모형 불확실성 전체를 포함하지 않는다.",
+    "대여소 악화 확률은 운영상 서비스 안정성이며 인구·소득 형평성 지표가 아니다.",
+    "80% persistent 기준은 설명용 분류이며 정책 선택이나 통계적 유의성 기준이 아니다."
   ],
   "output_files": {
     "policy_runs": "reports\\data\\gangnam_2025_11_latent_policy_runs.csv",
     "paired_runs": "reports\\data\\gangnam_2025_11_latent_paired_runs.csv",
     "scenario_summary": "reports\\data\\gangnam_2025_11_latent_summary.csv",
+    "station_runs": "reports\\data\\gangnam_2025_11_latent_station_runs.parquet",
+    "station_summary": "reports\\data\\gangnam_2025_11_latent_station_summary.csv",
     "figure": "reports\\figures\\gangnam_2025_11_latent_sensitivity.png",
+    "station_figure": "reports\\figures\\gangnam_2025_11_latent_station_robustness.png",
     "json_report": "reports\\gangnam_2025_11_latent_sensitivity.json",
     "markdown_report": "reports\\gangnam_2025_11_latent_sensitivity.md"
   }
