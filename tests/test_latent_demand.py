@@ -183,7 +183,7 @@ def test_duplicate_station_timestamp_fails_closed() -> None:
         build_latent_demand_manifest(_trips(), duplicated, _config())
 
 
-def test_empirical_hourly_cap_is_enforced() -> None:
+def test_poisson_q99_hard_cap_preserves_normal_tail() -> None:
     station_hour = _station_hour(
         evaluation_start_bikes=0,
         evaluation_end_bikes=0,
@@ -191,14 +191,13 @@ def test_empirical_hourly_cap_is_enforced() -> None:
     )
     manifest = build_latent_demand_manifest(_trips(), station_hour, _config())
 
-    assert manifest.requests.height <= 60
-    assert manifest.requests["hourly_cap"].unique().to_list() == [60]
-    assert manifest.audit.capped_intervals == 1
-    assert manifest.audit.dropped_candidates_by_cap > 0
-    assert manifest.audit.generated_candidates_before_cap >= manifest.requests.height
-    assert manifest.audit.dropped_candidates_by_cap == (
-        manifest.audit.generated_candidates_before_cap - manifest.requests.height
-    )
+    assert manifest.requests.height == 63
+    assert manifest.requests["empirical_p95_per_hour"].unique().to_list() == [60]
+    assert manifest.requests["poisson_q99_high_window"].unique().to_list() == [79]
+    assert manifest.requests["hard_count_cap"].unique().to_list() == [79]
+    assert manifest.audit.hard_capped_intervals == 0
+    assert manifest.audit.dropped_candidates_by_hard_cap == 0
+    assert manifest.audit.generated_candidates_before_hard_cap == manifest.requests.height
 
 
 def test_district_backoff_is_audited_when_origin_has_no_training_rows() -> None:
@@ -218,3 +217,64 @@ def test_district_backoff_is_audited_when_origin_has_no_training_rows() -> None:
     assert manifest.requests["intensity_pool"].unique().to_list() == ["district_day_hour"]
     assert manifest.requests["trip_pool"].unique().to_list() == ["district_day_hour"]
     assert manifest.audit.district_fallback_rate == 1.0
+
+
+def test_empirical_p95_caps_hourly_intensity_before_generation() -> None:
+    training_start = datetime(2025, 9, 1)
+    training_end = datetime(2025, 10, 1)
+    evaluation_start = datetime(2025, 10, 6)
+    weekdays = []
+    cursor = training_start
+    while len(weekdays) < 21:
+        if cursor.weekday() < 5:
+            weekdays.append(cursor)
+        cursor += timedelta(days=1)
+
+    timestamps = []
+    rentals = []
+    bikes = []
+    for index, start in enumerate(weekdays):
+        timestamps.extend([start, start + timedelta(hours=1)])
+        rentals.extend([1_000 if index == 20 else 1, 0])
+        bikes.extend([5, 5])
+    timestamps.extend([evaluation_start, evaluation_start + timedelta(hours=1)])
+    rentals.extend([0, 0])
+    bikes.extend([0, 0])
+    station_hour = pl.DataFrame(
+        {
+            "timestamp": timestamps,
+            "station_id": ["A"] * len(timestamps),
+            "available_bikes": bikes,
+            "rentals": rentals,
+            "inventory_observed": [True] * len(timestamps),
+            "actionable": [True] * len(timestamps),
+        }
+    )
+    trip_rows = []
+    for index in range(20):
+        rent_at = training_start + timedelta(minutes=index)
+        trip_rows.append(
+            {
+                "rent_at": rent_at,
+                "return_at": rent_at + timedelta(minutes=10),
+                "rent_station_id": "A",
+                "return_station_id": "OUT",
+                "duration_minutes": 10,
+                "rent_in_scope": True,
+            }
+        )
+    config = LatentDemandConfig(
+        training_start=training_start,
+        training_end=training_end,
+        evaluation_start=evaluation_start,
+        evaluation_end=evaluation_start + timedelta(hours=1),
+    )
+
+    manifest = build_latent_demand_manifest(pl.DataFrame(trip_rows), station_hour, config)
+
+    assert manifest.audit.intensity_rate_capped_intervals == 1
+    assert manifest.audit.intensity_rate_capped_interval_rate == 1.0
+    if not manifest.requests.is_empty():
+        assert manifest.requests["raw_hourly_intensity"][0] > 1
+        assert manifest.requests["hourly_intensity"][0] == 1
+        assert manifest.requests["empirical_p95_per_hour"][0] == 1

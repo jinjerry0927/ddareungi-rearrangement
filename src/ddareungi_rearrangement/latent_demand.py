@@ -12,7 +12,7 @@ from typing import Any
 
 import polars as pl
 
-CONTRACT_VERSION = "latent-demand-v1"
+CONTRACT_VERSION = "latent-demand-v2"
 SCENARIO_ORDER = ("low", "base", "high")
 SCENARIO_BOUNDARY_MINUTES = {"low": 15, "base": 30, "high": 45}
 
@@ -52,10 +52,12 @@ class LatentDemandAudit:
     evaluation_censored_intervals: int
     evaluation_both_zero_intervals: int
     evaluation_boundary_zero_intervals: int
-    generated_candidates_before_cap: int
-    dropped_candidates_by_cap: int
-    capped_intervals: int
-    capped_interval_rate: float
+    intensity_rate_capped_intervals: int
+    intensity_rate_capped_interval_rate: float
+    generated_candidates_before_hard_cap: int
+    dropped_candidates_by_hard_cap: int
+    hard_capped_intervals: int
+    hard_capped_interval_rate: float
     intensity_pool_intervals: dict[str, int]
     district_fallback_rate: float
     scenario_requests: dict[str, int]
@@ -86,8 +88,9 @@ class _StationInterval:
 
 @dataclass(frozen=True)
 class _IntensityModel:
+    raw_rate_per_hour: float
     rate_per_hour: float
-    hourly_cap: int
+    empirical_p95_per_hour: int
     pool_name: str
     training_exposures: int
 
@@ -120,8 +123,11 @@ _REQUEST_SCHEMA = {
     "intensity_training_hours": pl.Int64,
     "trip_pool": pl.String,
     "trip_pool_records": pl.Int64,
+    "raw_hourly_intensity": pl.Float64,
     "hourly_intensity": pl.Float64,
-    "hourly_cap": pl.Int64,
+    "empirical_p95_per_hour": pl.Int64,
+    "poisson_q99_high_window": pl.Int64,
+    "hard_count_cap": pl.Int64,
     "contract_version": pl.String,
 }
 
@@ -133,7 +139,7 @@ def build_latent_demand_manifest(
     *,
     eligible_station_ids: set[str] | None = None,
 ) -> LatentDemandManifest:
-    """동결된 v1 계약에 따라 정책 독립적인 합성 요청 manifest를 만든다."""
+    """동결된 v2 계약에 따라 정책 독립적인 합성 요청 manifest를 만든다."""
 
     intervals = _build_station_intervals(station_hour, eligible_station_ids)
     training_intervals = [
@@ -157,9 +163,10 @@ def build_latent_demand_manifest(
 
     request_rows: list[dict[str, Any]] = []
     intensity_pool_intervals: defaultdict[str, int] = defaultdict(int)
-    generated_before_cap = 0
-    dropped_by_cap = 0
-    capped_intervals = 0
+    intensity_rate_capped_intervals = 0
+    generated_before_hard_cap = 0
+    dropped_by_hard_cap = 0
+    hard_capped_intervals = 0
     both_zero_intervals = 0
     boundary_zero_intervals = 0
 
@@ -170,11 +177,14 @@ def build_latent_demand_manifest(
             boundary_zero_intervals += 1
         intensity = _select_intensity_model(interval, intensity_pools, config)
         intensity_pool_intervals[intensity.pool_name] += 1
+        if intensity.rate_per_hour < intensity.raw_rate_per_hour:
+            intensity_rate_capped_intervals += 1
+        poisson_q99, hard_count_cap = _hard_count_cap(interval, intensity)
         candidates = _generate_high_candidates(interval, intensity, config.seed)
-        generated_before_cap += len(candidates)
-        if len(candidates) > intensity.hourly_cap:
-            capped_intervals += 1
-            dropped_by_cap += len(candidates) - intensity.hourly_cap
+        generated_before_hard_cap += len(candidates)
+        if len(candidates) > hard_count_cap:
+            hard_capped_intervals += 1
+            dropped_by_hard_cap += len(candidates) - hard_count_cap
             candidates = sorted(
                 candidates,
                 key=lambda candidate: _stable_int(
@@ -184,7 +194,7 @@ def build_latent_demand_manifest(
                     candidate[0],
                     "cap",
                 ),
-            )[: intensity.hourly_cap]
+            )[:hard_count_cap]
             candidates.sort(key=lambda candidate: candidate[1])
 
         for ordinal, rental_at in candidates:
@@ -211,8 +221,11 @@ def build_latent_demand_manifest(
                     "intensity_training_hours": intensity.training_exposures,
                     "trip_pool": trip_pool.name,
                     "trip_pool_records": len(trip_pool.templates),
+                    "raw_hourly_intensity": intensity.raw_rate_per_hour,
                     "hourly_intensity": intensity.rate_per_hour,
-                    "hourly_cap": intensity.hourly_cap,
+                    "empirical_p95_per_hour": intensity.empirical_p95_per_hour,
+                    "poisson_q99_high_window": poisson_q99,
+                    "hard_count_cap": hard_count_cap,
                     "contract_version": CONTRACT_VERSION,
                 }
             )
@@ -236,10 +249,12 @@ def build_latent_demand_manifest(
         evaluation_censored_intervals=censored_count,
         evaluation_both_zero_intervals=both_zero_intervals,
         evaluation_boundary_zero_intervals=boundary_zero_intervals,
-        generated_candidates_before_cap=generated_before_cap,
-        dropped_candidates_by_cap=dropped_by_cap,
-        capped_intervals=capped_intervals,
-        capped_interval_rate=_rate(capped_intervals, censored_count),
+        intensity_rate_capped_intervals=intensity_rate_capped_intervals,
+        intensity_rate_capped_interval_rate=_rate(intensity_rate_capped_intervals, censored_count),
+        generated_candidates_before_hard_cap=generated_before_hard_cap,
+        dropped_candidates_by_hard_cap=dropped_by_hard_cap,
+        hard_capped_intervals=hard_capped_intervals,
+        hard_capped_interval_rate=_rate(hard_capped_intervals, censored_count),
         intensity_pool_intervals=dict(sorted(intensity_pool_intervals.items())),
         district_fallback_rate=_rate(district_count, censored_count),
         scenario_requests=scenario_counts,
@@ -346,9 +361,12 @@ def _select_intensity_model(
         values = values_by_key.get(key_function(interval), [])
         sufficient = len(values) >= config.minimum_intensity_exposures
         if values and (sufficient or name == "district_day_hour"):
+            raw_rate_per_hour = sum(values) / len(values)
+            empirical_p95_per_hour = max(1, _nearest_rank_quantile(values, 0.95))
             return _IntensityModel(
-                rate_per_hour=sum(values) / len(values),
-                hourly_cap=max(1, _nearest_rank_quantile(values, 0.95)),
+                raw_rate_per_hour=raw_rate_per_hour,
+                rate_per_hour=min(raw_rate_per_hour, empirical_p95_per_hour),
+                empirical_p95_per_hour=empirical_p95_per_hour,
                 pool_name=name,
                 training_exposures=len(values),
             )
@@ -466,6 +484,17 @@ def _generate_high_candidates(
     return candidates
 
 
+def _hard_count_cap(
+    interval: _StationInterval,
+    intensity: _IntensityModel,
+) -> tuple[int, int]:
+    high_start, high_end = _high_window(interval)
+    high_exposure_hours = (high_end - high_start).total_seconds() / 3600
+    expected_candidates = intensity.rate_per_hour * high_exposure_hours
+    poisson_q99 = _poisson_quantile(expected_candidates, 0.99)
+    return poisson_q99, max(intensity.empirical_p95_per_hour, poisson_q99)
+
+
 def _high_window(interval: _StationInterval) -> tuple[datetime, datetime]:
     high_minutes = SCENARIO_BOUNDARY_MINUTES["high"]
     if interval.start_bikes == 0 and interval.end_bikes == 0:
@@ -507,6 +536,27 @@ def _nearest_rank_quantile(values: list[int], quantile: float) -> int:
     ordered = sorted(values)
     index = max(0, math.ceil(quantile * len(ordered)) - 1)
     return ordered[index]
+
+
+def _poisson_quantile(mean: float, quantile: float) -> int:
+    if mean < 0:
+        raise ValueError("Poisson 평균은 음수일 수 없습니다")
+    if not 0 < quantile < 1:
+        raise ValueError("Poisson 분위수 확률은 0과 1 사이여야 합니다")
+    if mean == 0:
+        return 0
+    if mean > 700:
+        raise LatentDemandError("Poisson 평균이 안정적인 정확 계산 범위 700을 초과했습니다")
+    probability = math.exp(-mean)
+    cumulative = probability
+    value = 0
+    while cumulative < quantile:
+        value += 1
+        probability *= mean / value
+        cumulative += probability
+        if value > 100_000:
+            raise LatentDemandError("Poisson 99백분위수 계산이 수렴하지 않았습니다")
+    return value
 
 
 def _stable_int(*parts: object) -> int:
