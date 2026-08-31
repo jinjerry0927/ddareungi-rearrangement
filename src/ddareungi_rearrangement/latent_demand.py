@@ -258,9 +258,10 @@ def build_latent_demand_manifest(
         intensity_pool_intervals=dict(sorted(intensity_pool_intervals.items())),
         district_fallback_rate=_rate(district_count, censored_count),
         scenario_requests=scenario_counts,
-        master_manifest_hash=_manifest_hash(requests),
+        master_manifest_hash=calculate_request_manifest_hash(requests),
         scenario_manifest_hashes={
-            scenario: _manifest_hash(frame) for scenario, frame in scenario_frames.items()
+            scenario: calculate_request_manifest_hash(frame)
+            for scenario, frame in scenario_frames.items()
         },
     )
     return LatentDemandManifest(requests=requests, audit=audit)
@@ -564,7 +565,11 @@ def _stable_int(*parts: object) -> int:
     return int.from_bytes(hashlib.sha256(payload).digest()[:16], "big")
 
 
-def _manifest_hash(frame: pl.DataFrame) -> str:
+def calculate_request_manifest_hash(frame: pl.DataFrame) -> str:
+    """Return the canonical SHA-256 hash used by latent-demand manifests."""
+
+    if "request_id" not in frame.columns:
+        raise LatentDemandError("manifest hash 계산에 request_id 열이 필요합니다")
     canonical_rows = []
     for row in frame.sort("request_id").iter_rows(named=True):
         canonical_rows.append(

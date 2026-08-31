@@ -2,13 +2,16 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 import polars as pl
+import pytest
 
+from ddareungi_rearrangement.latent_demand import calculate_request_manifest_hash
 from ddareungi_rearrangement.seoul_api import LiveBikePage
 from ddareungi_rearrangement.simulation import (
     FleetExecutionConfig,
     GreedyNearestPolicy,
     NoRelocationPolicy,
     SimulationConfig,
+    SimulationError,
     StaticThresholdPolicy,
     build_replay_scenario,
     run_daily_policy_comparison,
@@ -72,6 +75,156 @@ def test_failed_rental_suppresses_return_and_unconditional_inbound_still_arrives
     assert run.metrics.final_station_bikes == 3
     assert run.metrics.empty_station_minutes == 45
     assert run.metrics.conservation_residual == 0
+
+
+def test_legacy_replay_keeps_trace_and_source_sidecars_unchanged() -> None:
+    start = datetime(2025, 11, 24)
+    end = datetime(2025, 11, 24, 1)
+    trips = pl.DataFrame(
+        {
+            "rent_at": [datetime(2025, 11, 24, 0, 10)],
+            "return_at": [datetime(2025, 11, 24, 0, 20)],
+            "rent_station_id": ["A"],
+            "return_station_id": ["B"],
+        }
+    )
+
+    run = simulate_replay(
+        build_replay_scenario(
+            trips,
+            _station_hour(start, bikes_a=1, bikes_b=0),
+            SimulationConfig(start=start, end=end),
+        ),
+        NoRelocationPolicy(),
+        collect_trace=True,
+    )
+
+    assert run.source_metrics is None
+    assert run.source_station_metrics is None
+    assert run.metrics.observed_requests == 1
+    assert run.metrics.successful_rentals == 1
+    assert run.metrics.successful_internal_returns == 1
+    assert run.event_trace is not None
+    assert run.event_trace.columns == [
+        "policy_name",
+        "timestamp",
+        "trace_sequence",
+        "event_kind",
+        "station_id",
+        "counterparty_station_id",
+        "trip_id",
+        "bike_count",
+        "inventory_before",
+        "inventory_after",
+        "rental_outcome",
+        "distance_km",
+        "travel_minutes",
+        "vehicle_id",
+        "job_id",
+    ]
+
+
+def test_latent_manifest_adds_source_metrics_and_preserves_all_flow_equations() -> None:
+    start = datetime(2025, 11, 24)
+    end = datetime(2025, 11, 24, 1)
+    trips = pl.DataFrame(
+        {
+            "rent_at": [datetime(2025, 11, 24, 0, 25)],
+            "return_at": [datetime(2025, 11, 24, 1, 25)],
+            "rent_station_id": ["B"],
+            "return_station_id": ["OUT"],
+        }
+    )
+    latent_requests = pl.DataFrame(
+        {
+            "request_id": ["syn:success", "syn:failure"],
+            "source": ["synthetic_latent", "synthetic_latent"],
+            "rental_at": [
+                datetime(2025, 11, 24, 0, 10),
+                datetime(2025, 11, 24, 0, 11),
+            ],
+            "return_at": [
+                datetime(2025, 11, 24, 0, 20),
+                datetime(2025, 11, 24, 0, 30),
+            ],
+            "origin_station_id": ["A", "A"],
+            "destination_station_id": ["B", "B"],
+        }
+    )
+    manifest_hash = calculate_request_manifest_hash(latent_requests)
+    scenario = build_replay_scenario(
+        trips,
+        _station_hour(start, bikes_a=1, bikes_b=0),
+        SimulationConfig(start=start, end=end),
+        latent_requests=latent_requests,
+        latent_request_manifest_hash=manifest_hash,
+    )
+
+    run = simulate_replay(scenario, NoRelocationPolicy(), collect_trace=True)
+
+    assert run.source_metrics is not None
+    assert run.source_metrics.request_manifest_hash == manifest_hash
+    assert run.source_metrics.observed_requests == 1
+    assert run.source_metrics.observed_successful_rentals == 1
+    assert run.source_metrics.synthetic_requests == 2
+    assert run.source_metrics.synthetic_successful_rentals == 1
+    assert run.source_metrics.synthetic_failed_rentals == 1
+    assert run.source_metrics.combined_requests == 3
+    assert run.source_metrics.combined_successful_rentals == 2
+    assert run.source_metrics.observed_outbound_departures == 1
+    assert run.source_metrics.synthetic_successful_internal_returns == 1
+    assert run.source_metrics.observed_trip_flow_residual == 0
+    assert run.source_metrics.synthetic_trip_flow_residual == 0
+    assert run.source_metrics.combined_trip_flow_residual == 0
+    assert run.source_metrics.total_conservation_residual == 0
+    assert run.metrics.conservation_residual == 0
+    assert run.metrics.final_station_bikes == 0
+
+    assert run.source_station_metrics is not None
+    assert run.source_station_metrics.height == 6
+    combined_a = run.source_station_metrics.filter(
+        (pl.col("station_id") == "A") & (pl.col("request_source") == "combined")
+    ).row(0, named=True)
+    assert combined_a["requests"] == 2
+    assert combined_a["successful_rentals"] == 1
+
+    assert run.event_trace is not None
+    synthetic_returns = run.event_trace.filter(
+        (pl.col("event_kind") == "conditional_return")
+        & (pl.col("request_source") == "synthetic_latent")
+    )
+    assert synthetic_returns["request_id"].to_list() == ["syn:success"]
+
+
+def test_latent_manifest_hash_mismatch_fails_closed() -> None:
+    start = datetime(2025, 11, 24)
+    latent_requests = pl.DataFrame(
+        {
+            "request_id": ["syn:one"],
+            "source": ["synthetic_latent"],
+            "rental_at": [datetime(2025, 11, 24, 0, 10)],
+            "return_at": [datetime(2025, 11, 24, 0, 20)],
+            "origin_station_id": ["A"],
+            "destination_station_id": ["B"],
+        }
+    )
+    empty_trips = pl.DataFrame(
+        schema={
+            "rent_at": pl.Datetime,
+            "return_at": pl.Datetime,
+            "rent_station_id": pl.String,
+            "return_station_id": pl.String,
+        }
+    )
+
+    with pytest.raises(SimulationError, match="hash 불일치"):
+        build_replay_scenario(
+            empty_trips,
+            _station_hour(start, bikes_a=1, bikes_b=0),
+            SimulationConfig(start=start, end=start + timedelta(hours=1)),
+            latent_requests=latent_requests,
+            latent_request_manifest_hash="0" * 64,
+        )
 
 
 def test_static_threshold_policy_respects_epoch_budget() -> None:

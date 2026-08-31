@@ -2,7 +2,7 @@
 
 ## 상태와 목적
 
-- 상태: v2 manifest 품질 게이트 PASS, 시뮬레이터 통합 대기
+- 상태: v2 manifest·선택적 시뮬레이터 통합 소형 게이트 PASS
 - 분석 등급: `post_hoc_latent_demand_sensitivity`
 - 대상: 2025년 11월 강남구 관측수요 재생 시뮬레이터
 - 목적: 자전거가 없어서 공개 대여이력에 남지 않은 **직접 미충족 대여수요**가 정책 비교를
@@ -220,9 +220,9 @@ OD와 이용시간의 결합을 유지한다. 유효 표본은 반납시각이 �
 
 기존 관측수요 기본 실행은 결과가 바뀌면 안 된다. 잠재수요 모드만 다음 지표를 추가한다.
 
-- `observed_requests`, `observed_successes`, `observed_failures`, `observed_service_rate`
-- `synthetic_requests`, `synthetic_successes`, `synthetic_failures`, `synthetic_service_rate`
-- `combined_requests`, `combined_successes`, `combined_failures`, `combined_service_rate`
+- `observed_requests`, `observed_successful_rentals`, `observed_failed_rentals`, `observed_service_rate`
+- `synthetic_requests`, `synthetic_successful_rentals`, `synthetic_failed_rentals`, `synthetic_service_rate`
+- `combined_requests`, `combined_successful_rentals`, `combined_failed_rentals`, `combined_service_rate`
 - 시나리오·seed·요청 manifest hash·pool backoff·상한 도달 감사값
 - 대여소별 같은 출처 분해와 p10 서비스율
 
@@ -274,6 +274,22 @@ p95 하드 상한은 Poisson 과정에서 자연스럽게 발생하는 상위 �
 v2는 v1이 제거한 정상 꼬리의 대부분을 복원하면서 사전 품질 게이트를 통과했다. 이 수치는
 잠재수요 manifest 결과이며 정책 효과 결과는 아니다.
 
+### 선택적 시뮬레이터 통합 게이트
+
+2026-08-31에 manifest와 해당 SHA-256을 반드시 함께 받는 선택적 통합을 구현했다. 입력 hash는
+이벤트 생성 전에 재계산하며 불일치, 필수값 결측, 중복 `request_id`, `synthetic_latent`가 아닌
+출처, 평가구간 밖 요청, 범위 밖 출발 대여소는 fail-closed 처리한다.
+
+manifest가 없는 관측 전용 실행은 기존 `SimulationMetrics`, 대여소 지표, trace 열을 그대로
+유지한다. manifest 실행만 `SourceDemandMetrics`와 `source_station_metrics`를 추가하고 trace에
+`request_id`, `request_source`를 덧붙인다. 호환성을 위해 기존 `SimulationMetrics` 필드명은
+바꾸지 않으므로 잠재수요 실행의 정확한 출처 해석에는 side-car 지표를 사용한다.
+
+소형 통합 사례에서 관측 1건과 합성 2건을 재생했다. 합성 1건은 성공 후 내부 반납했고, 같은
+출발지의 다음 합성 1건은 재고 0으로 실패해 예정 반납이 억제됐다. 관측·합성·combined
+trip-flow 잔차와 전체 자전거 보존식 잔차는 모두 0이었고, hash 변조 입력은 실행 전에
+거부됐다. 기존 39개 테스트와 신규 3개를 합친 전체 42개 테스트가 통과했다.
+
 ## 구현 합격 기준
 
 다음 조건을 모두 통과하기 전에는 165개 대여소·5일 정책 batch를 실행하지 않는다.
@@ -283,7 +299,7 @@ v2는 v1이 제거한 정상 꼬리의 대부분을 복원하면서 사전 품�
 3. 같은 seed 재실행 동일, 다른 seed 표본 변화 테스트
 4. 관측·합성 ID namespace와 출처별 지표 합계 테스트
 5. 합성 실패에는 반납이 없고 성공 내부여행에만 반납이 있는 테스트
-6. 관측 전용 기존 30개 테스트와 핵심 홀드아웃 수치 무변경 회귀 테스트
+6. 기존 전체 39개 테스트와 관측 전용 핵심 홀드아웃 수치 무변경 회귀 테스트
 7. 출처별·전체 자전거 보존식 잔차 0 테스트
 8. 정책별 manifest hash 불일치 시 fail-closed 테스트
 9. 실제 평가 입력의 마지막 강남구 pool 사용률 5% 이하

@@ -15,6 +15,7 @@ import matplotlib
 import polars as pl
 from matplotlib import font_manager
 
+from ddareungi_rearrangement.latent_demand import calculate_request_manifest_hash
 from ddareungi_rearrangement.seoul_api import LiveBikePage
 
 matplotlib.use("Agg")
@@ -335,6 +336,8 @@ class ReplayEvent:
     station_id: str = ""
     destination_id: str | None = None
     trip_id: int | None = None
+    request_id: str | None = None
+    request_source: str | None = None
     bike_count: int = 0
     vehicle_id: str | None = None
     job_id: int | None = None
@@ -349,6 +352,7 @@ class ReplayScenario:
     station_names: dict[str, str]
     initial_inventory: dict[str, int]
     events: tuple[ReplayEvent, ...]
+    latent_request_manifest_hash: str | None = None
 
 
 @dataclass(frozen=True)
@@ -415,11 +419,40 @@ class FleetExecutionMetrics:
 
 
 @dataclass(frozen=True)
+class SourceDemandMetrics:
+    request_manifest_hash: str
+    observed_requests: int
+    observed_successful_rentals: int
+    observed_failed_rentals: int
+    observed_service_rate: float
+    synthetic_requests: int
+    synthetic_successful_rentals: int
+    synthetic_failed_rentals: int
+    synthetic_service_rate: float
+    combined_requests: int
+    combined_successful_rentals: int
+    combined_failed_rentals: int
+    combined_service_rate: float
+    observed_successful_internal_returns: int
+    synthetic_successful_internal_returns: int
+    observed_outbound_departures: int
+    synthetic_outbound_departures: int
+    observed_internal_in_transit_at_end: int
+    synthetic_internal_in_transit_at_end: int
+    observed_trip_flow_residual: int
+    synthetic_trip_flow_residual: int
+    combined_trip_flow_residual: int
+    total_conservation_residual: int
+
+
+@dataclass(frozen=True)
 class SimulationRun:
     metrics: SimulationMetrics
     station_metrics: pl.DataFrame
     event_trace: pl.DataFrame | None = None
     fleet_metrics: FleetExecutionMetrics | None = None
+    source_metrics: SourceDemandMetrics | None = None
+    source_station_metrics: pl.DataFrame | None = None
 
 
 @dataclass(frozen=True)
@@ -683,6 +716,8 @@ def build_replay_scenario(
     config: SimulationConfig,
     *,
     eligible_station_ids: set[str] | None = None,
+    latent_requests: pl.DataFrame | None = None,
+    latent_request_manifest_hash: str | None = None,
 ) -> ReplayScenario:
     required_trip_columns = {
         "rent_at",
@@ -737,6 +772,50 @@ def build_replay_scenario(
             f"좌표 대상 중 시작 재고가 없는 대여소: {', '.join(sorted(unavailable)[:5]) or 'none'}"
         )
 
+    if (latent_requests is None) != (latent_request_manifest_hash is None):
+        raise SimulationError("잠재수요 manifest와 SHA-256 해시는 반드시 함께 제공해야 합니다")
+    if latent_requests is not None and latent_request_manifest_hash is not None:
+        required_latent_columns = {
+            "request_id",
+            "source",
+            "rental_at",
+            "return_at",
+            "origin_station_id",
+            "destination_station_id",
+        }
+        missing_latent_columns = required_latent_columns - set(latent_requests.columns)
+        if missing_latent_columns:
+            raise SimulationError(
+                f"잠재수요 manifest 필수 열 누락: {sorted(missing_latent_columns)}"
+            )
+        null_columns = [
+            column
+            for column in sorted(required_latent_columns)
+            if latent_requests[column].null_count() > 0
+        ]
+        if null_columns:
+            raise SimulationError(f"잠재수요 manifest 필수값 결측: {null_columns}")
+        actual_manifest_hash = calculate_request_manifest_hash(latent_requests)
+        if actual_manifest_hash != latent_request_manifest_hash:
+            raise SimulationError(
+                "잠재수요 manifest hash 불일치: 입력이 생성 이후 변경됐을 수 있습니다"
+            )
+        if latent_requests["request_id"].n_unique() != latent_requests.height:
+            raise SimulationError("잠재수요 manifest request_id가 중복됐습니다")
+        invalid_sources = latent_requests.filter(pl.col("source") != "synthetic_latent")
+        if not invalid_sources.is_empty():
+            raise SimulationError("잠재수요 manifest source는 synthetic_latent여야 합니다")
+        invalid_times = latent_requests.filter(
+            (pl.col("rental_at") < config.start)
+            | (pl.col("rental_at") >= config.end)
+            | (pl.col("return_at") <= pl.col("rental_at"))
+        )
+        if not invalid_times.is_empty():
+            raise SimulationError("잠재수요 manifest 요청·반납시각이 평가구간과 맞지 않습니다")
+        invalid_origins = latent_requests.filter(~pl.col("origin_station_id").is_in(station_ids))
+        if not invalid_origins.is_empty():
+            raise SimulationError("잠재수요 manifest 출발 대여소가 시뮬레이션 범위 밖입니다")
+
     relevant = (
         trips.with_row_index("trip_id")
         .filter(
@@ -780,6 +859,7 @@ def build_replay_scenario(
         )
 
         if rental_in_window:
+            request_id = f"obs:{trip_id}"
             events.append(
                 ReplayEvent(
                     timestamp=rent_at,
@@ -789,6 +869,8 @@ def build_replay_scenario(
                     station_id=origin_id,
                     destination_id=destination_id if destination_in_scope else None,
                     trip_id=trip_id,
+                    request_id=request_id,
+                    request_source="observed",
                 )
             )
             sequence += 1
@@ -801,6 +883,8 @@ def build_replay_scenario(
                     kind="conditional_return",
                     station_id=destination_id,
                     trip_id=trip_id,
+                    request_id=request_id,
+                    request_source="observed",
                 )
             )
             sequence += 1
@@ -818,9 +902,48 @@ def build_replay_scenario(
                     kind="unconditional_return",
                     station_id=destination_id,
                     trip_id=trip_id,
+                    request_id=f"obs:{trip_id}",
+                    request_source="observed",
                 )
             )
             sequence += 1
+
+    if latent_requests is not None:
+        for row in latent_requests.sort("rental_at", "origin_station_id", "request_id").iter_rows(
+            named=True
+        ):
+            request_id = str(row["request_id"])
+            rental_at = row["rental_at"]
+            return_at = row["return_at"]
+            origin_id = str(row["origin_station_id"])
+            destination_id = str(row["destination_station_id"])
+            destination_in_scope = destination_id in station_ids
+            events.append(
+                ReplayEvent(
+                    timestamp=rental_at,
+                    priority=2,
+                    sequence=sequence,
+                    kind="rental",
+                    station_id=origin_id,
+                    destination_id=destination_id if destination_in_scope else None,
+                    request_id=request_id,
+                    request_source="synthetic_latent",
+                )
+            )
+            sequence += 1
+            if destination_in_scope and rental_at < return_at < config.end:
+                events.append(
+                    ReplayEvent(
+                        timestamp=return_at,
+                        priority=0,
+                        sequence=sequence,
+                        kind="conditional_return",
+                        station_id=destination_id,
+                        request_id=request_id,
+                        request_source="synthetic_latent",
+                    )
+                )
+                sequence += 1
 
     decision_at = config.start
     while decision_at < config.end:
@@ -840,6 +963,7 @@ def build_replay_scenario(
         station_names=station_names,
         initial_inventory=initial_inventory,
         events=tuple(events),
+        latent_request_manifest_hash=latent_request_manifest_hash,
     )
 
 
@@ -878,7 +1002,15 @@ def simulate_replay(
     successes = dict.fromkeys(inventory, 0)
     relocated_in = dict.fromkeys(inventory, 0)
     relocated_out = dict.fromkeys(inventory, 0)
-    active_internal_trips: set[int] = set()
+    demand_sources = ("observed", "synthetic_latent")
+    source_requests = dict.fromkeys(demand_sources, 0)
+    source_successes = dict.fromkeys(demand_sources, 0)
+    source_failures = dict.fromkeys(demand_sources, 0)
+    source_internal_returns = dict.fromkeys(demand_sources, 0)
+    source_outbound_departures = dict.fromkeys(demand_sources, 0)
+    source_station_requests = {source: dict.fromkeys(inventory, 0) for source in demand_sources}
+    source_station_successes = {source: dict.fromkeys(inventory, 0) for source in demand_sources}
+    active_internal_trips: set[tuple[str, str]] = set()
     observed_requests = 0
     successful_rentals = 0
     failed_rentals = 0
@@ -938,6 +1070,8 @@ def simulate_replay(
         station_id: str,
         counterparty_station_id: str | None = None,
         trip_id: int | None = None,
+        request_id: str | None = None,
+        request_source: str | None = None,
         bike_count: int = 0,
         inventory_before: int,
         inventory_after: int,
@@ -950,26 +1084,39 @@ def simulate_replay(
         nonlocal trace_sequence
         if not collect_trace:
             return
-        trace_records.append(
-            {
-                "policy_name": policy.name,
-                "timestamp": timestamp,
-                "trace_sequence": trace_sequence,
-                "event_kind": event_kind,
-                "station_id": station_id,
-                "counterparty_station_id": counterparty_station_id,
-                "trip_id": trip_id,
-                "bike_count": bike_count,
-                "inventory_before": inventory_before,
-                "inventory_after": inventory_after,
-                "rental_outcome": rental_outcome,
-                "distance_km": distance_km,
-                "travel_minutes": travel_minutes,
-                "vehicle_id": vehicle_id,
-                "job_id": job_id,
-            }
-        )
+        trace_record = {
+            "policy_name": policy.name,
+            "timestamp": timestamp,
+            "trace_sequence": trace_sequence,
+            "event_kind": event_kind,
+            "station_id": station_id,
+            "counterparty_station_id": counterparty_station_id,
+            "trip_id": trip_id,
+            "bike_count": bike_count,
+            "inventory_before": inventory_before,
+            "inventory_after": inventory_after,
+            "rental_outcome": rental_outcome,
+            "distance_km": distance_km,
+            "travel_minutes": travel_minutes,
+            "vehicle_id": vehicle_id,
+            "job_id": job_id,
+        }
+        if scenario.latent_request_manifest_hash is not None:
+            trace_record["request_id"] = request_id
+            trace_record["request_source"] = request_source
+        trace_records.append(trace_record)
         trace_sequence += 1
+
+    def request_identity(event: ReplayEvent) -> tuple[str, str]:
+        source = event.request_source or "observed"
+        if source not in demand_sources:
+            raise SimulationError(f"알 수 없는 요청 출처: {source}")
+        request_id = event.request_id
+        if request_id is None and event.trip_id is not None:
+            request_id = f"obs:{event.trip_id}"
+        if request_id is None:
+            raise SimulationError(f"{event.kind} 이벤트 request_id가 누락됐습니다")
+        return source, request_id
 
     def change_inventory(station_id: str, delta: int, timestamp: datetime) -> None:
         before = inventory[station_id]
@@ -1146,16 +1293,21 @@ def simulate_replay(
                 inventory_after=inventory[event.station_id],
             )
         elif event.kind == "conditional_return":
-            if event.trip_id in active_internal_trips:
+            request_source, request_id = request_identity(event)
+            request_key = (request_source, request_id)
+            if request_key in active_internal_trips:
                 inventory_before = inventory[event.station_id]
                 change_inventory(event.station_id, 1, event.timestamp)
-                active_internal_trips.remove(event.trip_id)
+                active_internal_trips.remove(request_key)
                 successful_internal_returns += 1
+                source_internal_returns[request_source] += 1
                 record_trace(
                     timestamp=event.timestamp,
                     event_kind="conditional_return",
                     station_id=event.station_id,
                     trip_id=event.trip_id,
+                    request_id=request_id,
+                    request_source=request_source,
                     bike_count=1,
                     inventory_before=inventory_before,
                     inventory_after=inventory[event.station_id],
@@ -1345,17 +1497,23 @@ def simulate_replay(
                     dispatched_this_epoch,
                 )
         elif event.kind == "rental":
+            request_source, request_id = request_identity(event)
             observed_requests += 1
+            source_requests[request_source] += 1
+            source_station_requests[request_source][event.station_id] += 1
             requests[event.station_id] += 1
             inventory_before = inventory[event.station_id]
             if inventory[event.station_id] == 0:
                 failed_rentals += 1
+                source_failures[request_source] += 1
                 record_trace(
                     timestamp=event.timestamp,
                     event_kind="rental",
                     station_id=event.station_id,
                     counterparty_station_id=event.destination_id,
                     trip_id=event.trip_id,
+                    request_id=request_id,
+                    request_source=request_source,
                     bike_count=1,
                     inventory_before=inventory_before,
                     inventory_after=inventory_before,
@@ -1364,6 +1522,8 @@ def simulate_replay(
                 continue
             change_inventory(event.station_id, -1, event.timestamp)
             successful_rentals += 1
+            source_successes[request_source] += 1
+            source_station_successes[request_source][event.station_id] += 1
             successes[event.station_id] += 1
             record_trace(
                 timestamp=event.timestamp,
@@ -1371,6 +1531,8 @@ def simulate_replay(
                 station_id=event.station_id,
                 counterparty_station_id=event.destination_id,
                 trip_id=event.trip_id,
+                request_id=request_id,
+                request_source=request_source,
                 bike_count=1,
                 inventory_before=inventory_before,
                 inventory_after=inventory[event.station_id],
@@ -1378,8 +1540,9 @@ def simulate_replay(
             )
             if event.destination_id is None:
                 outbound_departures += 1
-            elif event.trip_id is not None:
-                active_internal_trips.add(event.trip_id)
+                source_outbound_departures[request_source] += 1
+            else:
+                active_internal_trips.add((request_source, request_id))
         else:
             raise SimulationError(f"알 수 없는 이벤트: {event.kind}")
 
@@ -1412,6 +1575,30 @@ def simulate_replay(
             }
         )
     station_metrics = pl.DataFrame(station_records)
+    source_station_metrics = None
+    if scenario.latent_request_manifest_hash is not None:
+        source_station_records = []
+        for station_id in sorted(inventory):
+            for request_source in (*demand_sources, "combined"):
+                if request_source == "combined":
+                    station_requests = requests[station_id]
+                    station_successes = successes[station_id]
+                else:
+                    station_requests = source_station_requests[request_source][station_id]
+                    station_successes = source_station_successes[request_source][station_id]
+                source_station_records.append(
+                    {
+                        "policy_name": policy.name,
+                        "station_id": station_id,
+                        "station_name": scenario.station_names[station_id],
+                        "request_source": request_source,
+                        "requests": station_requests,
+                        "successful_rentals": station_successes,
+                        "failed_rentals": station_requests - station_successes,
+                        "service_rate": _rate(station_successes, station_requests),
+                    }
+                )
+        source_station_metrics = pl.DataFrame(source_station_records)
     eligible_service = station_metrics.filter(pl.col("requests") >= 10).sort("service_rate")
     if eligible_service.is_empty():
         eligible_service = station_metrics.filter(pl.col("requests") > 0).sort("service_rate")
@@ -1433,6 +1620,41 @@ def simulate_replay(
         raise SimulationError(f"자전거 보존식 위반: residual={conservation_residual}")
     if successful_rentals + failed_rentals != observed_requests:
         raise SimulationError("대여 성공·실패 합이 전체 요청과 다릅니다")
+
+    active_internal_by_source = {
+        source: sum(active_source == source for active_source, _ in active_internal_trips)
+        for source in demand_sources
+    }
+    source_flow_residuals = {
+        source: (
+            source_successes[source]
+            - source_internal_returns[source]
+            - source_outbound_departures[source]
+            - active_internal_by_source[source]
+        )
+        for source in demand_sources
+    }
+    combined_flow_residual = (
+        successful_rentals
+        - successful_internal_returns
+        - outbound_departures
+        - len(active_internal_trips)
+    )
+    for source in demand_sources:
+        if source_successes[source] + source_failures[source] != source_requests[source]:
+            raise SimulationError(f"{source} 대여 성공·실패 합이 요청 수와 다릅니다")
+        if source_flow_residuals[source] != 0:
+            raise SimulationError(
+                f"{source} trip-flow 보존식 위반: residual={source_flow_residuals[source]}"
+            )
+    if (
+        sum(source_requests.values()) != observed_requests
+        or sum(source_successes.values()) != successful_rentals
+        or sum(source_failures.values()) != failed_rentals
+    ):
+        raise SimulationError("출처별 대여 지표 합이 전체 대여 지표와 다릅니다")
+    if combined_flow_residual != 0:
+        raise SimulationError(f"전체 trip-flow 보존식 위반: residual={combined_flow_residual}")
 
     period_minutes = (config.end - config.start).total_seconds() / 60
     metrics = SimulationMetrics(
@@ -1470,6 +1692,36 @@ def simulate_replay(
         worst_station_name=str(worst["station_name"]),
         worst_station_service_rate=float(worst["service_rate"]),
     )
+    source_metrics = None
+    if scenario.latent_request_manifest_hash is not None:
+        source_metrics = SourceDemandMetrics(
+            request_manifest_hash=scenario.latent_request_manifest_hash,
+            observed_requests=source_requests["observed"],
+            observed_successful_rentals=source_successes["observed"],
+            observed_failed_rentals=source_failures["observed"],
+            observed_service_rate=_rate(source_successes["observed"], source_requests["observed"]),
+            synthetic_requests=source_requests["synthetic_latent"],
+            synthetic_successful_rentals=source_successes["synthetic_latent"],
+            synthetic_failed_rentals=source_failures["synthetic_latent"],
+            synthetic_service_rate=_rate(
+                source_successes["synthetic_latent"],
+                source_requests["synthetic_latent"],
+            ),
+            combined_requests=observed_requests,
+            combined_successful_rentals=successful_rentals,
+            combined_failed_rentals=failed_rentals,
+            combined_service_rate=_rate(successful_rentals, observed_requests),
+            observed_successful_internal_returns=source_internal_returns["observed"],
+            synthetic_successful_internal_returns=source_internal_returns["synthetic_latent"],
+            observed_outbound_departures=source_outbound_departures["observed"],
+            synthetic_outbound_departures=source_outbound_departures["synthetic_latent"],
+            observed_internal_in_transit_at_end=active_internal_by_source["observed"],
+            synthetic_internal_in_transit_at_end=active_internal_by_source["synthetic_latent"],
+            observed_trip_flow_residual=source_flow_residuals["observed"],
+            synthetic_trip_flow_residual=source_flow_residuals["synthetic_latent"],
+            combined_trip_flow_residual=combined_flow_residual,
+            total_conservation_residual=conservation_residual,
+        )
     fleet_metrics = None
     if fleet_config is not None:
         vehicle_summaries = []
@@ -1535,26 +1787,36 @@ def simulate_replay(
         )
     event_trace = None
     if collect_trace:
+        trace_schema: dict[str, pl.DataType] = {
+            "timestamp": pl.Datetime,
+            "trace_sequence": pl.Int64,
+            "trip_id": pl.Int64,
+            "bike_count": pl.Int64,
+            "inventory_before": pl.Int64,
+            "inventory_after": pl.Int64,
+            "distance_km": pl.Float64,
+            "travel_minutes": pl.Float64,
+            "vehicle_id": pl.String,
+            "job_id": pl.Int64,
+        }
+        if scenario.latent_request_manifest_hash is not None:
+            trace_schema.update(
+                {
+                    "request_id": pl.String,
+                    "request_source": pl.String,
+                }
+            )
         event_trace = pl.DataFrame(
             trace_records,
-            schema_overrides={
-                "timestamp": pl.Datetime,
-                "trace_sequence": pl.Int64,
-                "trip_id": pl.Int64,
-                "bike_count": pl.Int64,
-                "inventory_before": pl.Int64,
-                "inventory_after": pl.Int64,
-                "distance_km": pl.Float64,
-                "travel_minutes": pl.Float64,
-                "vehicle_id": pl.String,
-                "job_id": pl.Int64,
-            },
+            schema_overrides=trace_schema,
         ).sort("timestamp", "trace_sequence")
     return SimulationRun(
         metrics=metrics,
         station_metrics=station_metrics,
         event_trace=event_trace,
         fleet_metrics=fleet_metrics,
+        source_metrics=source_metrics,
+        source_station_metrics=source_station_metrics,
     )
 
 

@@ -84,6 +84,7 @@ flowchart LR
 - 요청별 구제·악화 trace와 대여소별 개선·악화 분포 산출
 - 사용자 이동 중·재배치 중 자전거까지 포함한 보존식 검증
 - 선택적 fleet 실행에서 차량 접근·픽업 시점 재고·busy 상태·연속 배송 위치 반영
+- 선택적 잠재수요 manifest의 해시 검증과 관측·합성·combined side-car 지표
 
 주요 구현은 [simulation.py](src/ddareungi_rearrangement/simulation.py), 실행 인터페이스는
 [cli.py](src/ddareungi_rearrangement/cli.py), 회귀 테스트는
@@ -104,7 +105,7 @@ flowchart LR
 | 공급지 보호 학습 | reserve 5·6·7·8의 비가중 Pareto 비교 | [reserve 학습](reports/gangnam_2025_11_donor_reserve_training.md) |
 | 공급지 보호 검증 | 동결한 reserve 7과 기존 reserve 5의 단일 홀드아웃 | [reserve 홀드아웃](reports/gangnam_2025_11_donor_reserve_holdout.md) |
 | 차량 실행 민감도 | 즉시출발과 합성 fleet 1·2·3의 서비스·공차거리 범위 | [fleet 민감도](reports/gangnam_2025_11_fleet_sensitivity.md) |
-| 잠재수요 방법 설계 | 품절 검열시간·Poisson 강도·공통 seed·합성 반납 계약 | [잠재수요 생성 계약](docs/LATENT_DEMAND_CONTRACT.md) |
+| 잠재수요 manifest·통합 | 검열시간·Poisson 강도·hash·출처별 보존식 계약 | [잠재수요 생성 계약](docs/LATENT_DEMAND_CONTRACT.md) |
 
 기존 결과 파일은 보호형 정책을 P3라고 표기했지만, 초기 계획의 `Forecast + min-cost flow`
 P3와 충돌해 이후 명칭을 `P2-R`로 정리했습니다. 자세한 경계는
@@ -170,13 +171,14 @@ uv run ddareungi run-fleet-sensitivity
 .\scripts\verify.ps1
 ```
 
-현재 검증 기준은 Ruff lint·format, pytest **30개**, Python·필수 디렉터리·API 키 설정 확인
+현재 검증 기준은 Ruff lint·format, pytest **42개**, Python·필수 디렉터리·API 키 설정 확인
 통과입니다. 분석 명령은 기본 경로 대신 각 입력·출력 경로를 CLI 옵션으로 바꿀 수 있습니다.
 
 ## 해석할 때 지켜야 할 한계
 
 - 공개 대여이력에는 성공한 요청만 있어, 품절 때문에 시도하지 못한 잠재 수요는 빠져 있습니다.
-- 잠재수요 v2 manifest는 품질 게이트를 통과했지만 아직 정책 결과가 아닌 사후 민감도 입력입니다.
+- 잠재수요 v2 manifest와 시뮬레이터 통합은 소형 게이트를 통과했지만 아직 정책 결과가 아닌
+  사후 민감도 입력입니다.
 - 공식 거치대 수보다 재고가 많은 관측이 빈번해 만차·반납 실패는 아직 모델링하지 않습니다.
 - 좌표는 현재 API 스냅샷이라 2025년 운영 당시 위치와 다를 수 있습니다.
 - 핵심 P2-R 결과는 공급지 즉시출발이며, fleet 민감도만 합성 접근·연속 위치를 반영합니다.
