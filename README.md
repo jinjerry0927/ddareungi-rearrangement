@@ -4,7 +4,7 @@
 않는 재배치 정책을 찾는 데이터 분석 프로젝트입니다. 2025년 11월 강남구 대여·재고 이력을
 이벤트 단위로 재생하고, 정책별 서비스·형평성·운영량의 trade-off를 검증합니다.
 
-현재 단계는 **M9: donor reserve 7 단일 홀드아웃 검증 완료**입니다.
+현재 단계는 **M17: 잠재수요 50-seed 정책 민감도 완료**입니다.
 
 ![P0·P2·P3 donor reserve 홀드아웃 비교](reports/figures/gangnam_2025_11_donor_reserve_holdout.png)
 
@@ -53,6 +53,24 @@ fleet 3도 즉시출발보다 실패가 60건 늘고 총거리는 4.11배입니�
 
 ![P2-R fleet 실행모델 민감도](reports/figures/gangnam_2025_11_fleet_sensitivity.png)
 
+### 품절로 사라진 요청을 넣어도 정책 방향이 유지되는가
+
+시간별 재고가 0대인 구간의 직접 미충족수요를 Poisson 요청으로 합성하고, 사전 동결한 50개
+seed에서 P0와 P2-R이 매번 같은 요청 manifest를 보도록 paired 비교했습니다.
+
+| 수준 | 합성요청 평균 | P2-R combined 실패 방지 | 기존 관측요청 실패 방지 | combined p10 변화 | 악화 대여소 평균 |
+|---|---:|---:|---:|---:|---:|
+| low | 1,368건 | 1,509건 | 934건 | +32.47%p | 16.3곳 |
+| base | 1,645건 | 1,518건 | 899건 | +30.06%p | 17.2곳 |
+| high | 1,922건 | 1,532건 | 882건 | +27.68%p | 18.0곳 |
+
+세 수준 모두 P2-R의 실패 감소와 p10 개선 방향이 유지됐고, backoff·상한·합성비중을 포함한
+7개 사전 중단조건도 모두 통과했습니다. 다만 잠재요청이 늘수록 기존 관측요청의 실패 방지는
+줄고 악화 대여소는 늘어, **전체 서비스 개선과 기존 이용자 재고 경쟁이 함께 커지는 현상**이
+확인됩니다. 이는 실제 미충족수요 복원이 아니라 사후 민감도 범위입니다.
+
+![잠재수요 50-seed 정책 민감도](reports/figures/gangnam_2025_11_latent_sensitivity.png)
+
 ## 데이터와 실험 범위
 
 - 서울 전체 2025년 11월 대여이력 3,186,968행을 스트리밍 처리
@@ -72,6 +90,7 @@ flowchart LR
     E --> F["정책·지표 동결"]
     F --> G["단일 홀드아웃"]
     G --> H["서비스·피해·형평성·운영량 보고"]
+    G --> I["50-seed 잠재수요 민감도"]
 ```
 
 ## 시뮬레이터가 반영하는 것
@@ -86,9 +105,9 @@ flowchart LR
 - 선택적 fleet 실행에서 차량 접근·픽업 시점 재고·busy 상태·연속 배송 위치 반영
 - 선택적 잠재수요 manifest의 해시 검증과 관측·합성·combined side-car 지표
 
-주요 구현은 [simulation.py](src/ddareungi_rearrangement/simulation.py), 실행 인터페이스는
-[cli.py](src/ddareungi_rearrangement/cli.py), 회귀 테스트는
-[test_simulation.py](tests/test_simulation.py)에서 확인할 수 있습니다.
+주요 구현은 [simulation.py](src/ddareungi_rearrangement/simulation.py)와
+[latent_sensitivity.py](src/ddareungi_rearrangement/latent_sensitivity.py), 실행 인터페이스는
+[cli.py](src/ddareungi_rearrangement/cli.py)에서 확인할 수 있습니다.
 
 ## 분석 단계별 결과
 
@@ -106,6 +125,7 @@ flowchart LR
 | 공급지 보호 검증 | 동결한 reserve 7과 기존 reserve 5의 단일 홀드아웃 | [reserve 홀드아웃](reports/gangnam_2025_11_donor_reserve_holdout.md) |
 | 차량 실행 민감도 | 즉시출발과 합성 fleet 1·2·3의 서비스·공차거리 범위 | [fleet 민감도](reports/gangnam_2025_11_fleet_sensitivity.md) |
 | 잠재수요 manifest·통합 | 검열시간·Poisson 강도·hash·출처별 보존식 계약 | [잠재수요 생성 계약](docs/LATENT_DEMAND_CONTRACT.md) |
+| 잠재수요 정책 민감도 | 50개 seed에서 P0·P2-R 방향과 중단조건 검증 | [잠재수요 결과](reports/gangnam_2025_11_latent_sensitivity.md) |
 
 기존 결과 파일은 보호형 정책을 P3라고 표기했지만, 초기 계획의 `Forecast + min-cost flow`
 P3와 충돌해 이후 명칭을 `P2-R`로 정리했습니다. 자세한 경계는
@@ -163,6 +183,7 @@ uv run ddareungi run-harm-trace
 uv run ddareungi run-donor-reserve-training
 uv run ddareungi run-donor-reserve-holdout
 uv run ddareungi run-fleet-sensitivity
+uv run ddareungi run-latent-demand-sensitivity
 ```
 
 전체 코드 품질·회귀 테스트·환경 진단은 한 번에 실행할 수 있습니다.
@@ -171,14 +192,14 @@ uv run ddareungi run-fleet-sensitivity
 .\scripts\verify.ps1
 ```
 
-현재 검증 기준은 Ruff lint·format, pytest **42개**, Python·필수 디렉터리·API 키 설정 확인
+현재 검증 기준은 Ruff lint·format, pytest **45개**, Python·필수 디렉터리·API 키 설정 확인
 통과입니다. 분석 명령은 기본 경로 대신 각 입력·출력 경로를 CLI 옵션으로 바꿀 수 있습니다.
 
 ## 해석할 때 지켜야 할 한계
 
 - 공개 대여이력에는 성공한 요청만 있어, 품절 때문에 시도하지 못한 잠재 수요는 빠져 있습니다.
-- 잠재수요 v2 manifest와 시뮬레이터 통합은 소형 게이트를 통과했지만 아직 정책 결과가 아닌
-  사후 민감도 입력입니다.
+- 잠재수요 결과는 50개 생성 seed의 변동만 포함하며 실제 미충족수요나 전체 모형 불확실성을
+  복원한 값이 아닙니다.
 - 공식 거치대 수보다 재고가 많은 관측이 빈번해 만차·반납 실패는 아직 모델링하지 않습니다.
 - 좌표는 현재 API 스냅샷이라 2025년 운영 당시 위치와 다를 수 있습니다.
 - 핵심 P2-R 결과는 공급지 즉시출발이며, fleet 민감도만 합성 접근·연속 위치를 반영합니다.
