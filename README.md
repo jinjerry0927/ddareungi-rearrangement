@@ -4,7 +4,7 @@
 않는 재배치 정책을 찾는 데이터 분석 프로젝트입니다. 2025년 11월 강남구 대여·재고 이력을
 이벤트 단위로 재생하고, 정책별 서비스·형평성·운영량의 trade-off를 검증합니다.
 
-현재 단계는 **M17: 잠재수요 50-seed 정책 민감도 완료**입니다.
+현재 단계는 **M18: 잠재수요 대여소 공간 강건성 완료**입니다.
 
 ![P0·P2·P3 donor reserve 홀드아웃 비교](reports/figures/gangnam_2025_11_donor_reserve_holdout.png)
 
@@ -71,6 +71,17 @@ seed에서 P0와 P2-R이 매번 같은 요청 manifest를 보도록 paired 비�
 
 ![잠재수요 50-seed 정책 민감도](reports/figures/gangnam_2025_11_latent_sensitivity.png)
 
+대여소별로 보면 low/base/high에서 persistent 악화는 각각 8곳이며, 다음 7곳은 세 수준 모두
+50개 seed의 80% 이상에서 반복 악화됐습니다: `2305`, `2409`, `2416`, `2422`, `3609`,
+`3640`, `4935`. high 수준에서 `3640 일원1동주민센터앞 사거리`는 50/50 seed에서 악화되고
+P2-R 실패가 평균 10.46건 더 많았습니다. 관측 기준에서는 악화되지 않았지만 high에서 새로
+persistent가 된 곳은 `2387 래미안강남힐즈 사거리` 한 곳입니다.
+
+파란 테두리는 관측 전용 기준의 12개 악화 대여소, 색은 50개 seed의 악화 확률입니다. 이는
+인구 형평성 지도가 아니라 **재배치 정책의 공간적 서비스 안정성 지도**입니다.
+
+![잠재수요 대여소 공간 강건성](reports/figures/gangnam_2025_11_latent_station_robustness.png)
+
 ## 데이터와 실험 범위
 
 - 서울 전체 2025년 11월 대여이력 3,186,968행을 스트리밍 처리
@@ -126,6 +137,7 @@ flowchart LR
 | 차량 실행 민감도 | 즉시출발과 합성 fleet 1·2·3의 서비스·공차거리 범위 | [fleet 민감도](reports/gangnam_2025_11_fleet_sensitivity.md) |
 | 잠재수요 manifest·통합 | 검열시간·Poisson 강도·hash·출처별 보존식 계약 | [잠재수요 생성 계약](docs/LATENT_DEMAND_CONTRACT.md) |
 | 잠재수요 정책 민감도 | 50개 seed에서 P0·P2-R 방향과 중단조건 검증 | [잠재수요 결과](reports/gangnam_2025_11_latent_sensitivity.md) |
+| 잠재수요 공간 강건성 | 반복·간헐·새 악화 대여소와 50-seed 악화 확률 | [같은 잠재수요 결과의 공간 강건성](reports/gangnam_2025_11_latent_sensitivity.md#대여소-공간-강건성) |
 
 기존 결과 파일은 보호형 정책을 P3라고 표기했지만, 초기 계획의 `Forecast + min-cost flow`
 P3와 충돌해 이후 명칭을 `P2-R`로 정리했습니다. 자세한 경계는
