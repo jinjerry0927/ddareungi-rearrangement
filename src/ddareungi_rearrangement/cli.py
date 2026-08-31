@@ -14,6 +14,10 @@ from ddareungi_rearrangement.historical_audit import (
     build_historical_audit,
     write_historical_reports,
 )
+from ddareungi_rearrangement.latent_sensitivity import (
+    LatentSensitivityError,
+    build_latent_demand_sensitivity,
+)
 from ddareungi_rearrangement.live_audit import audit_live_bike_pages, write_audit_reports
 from ddareungi_rearrangement.pilot_analysis import (
     PilotAnalysisError,
@@ -587,6 +591,59 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("reports/gangnam_2025_11_fleet_sensitivity.md"),
     )
+    latent_parser = subparsers.add_parser(
+        "run-latent-demand-sensitivity",
+        help="동결된 50개 seed로 P0·P2-R 잠재수요 민감도를 실행합니다.",
+    )
+    latent_parser.add_argument(
+        "--trips-file",
+        type=Path,
+        default=Path("data/processed/gangnam_2025_11_trips.parquet"),
+    )
+    latent_parser.add_argument(
+        "--station-hour-file",
+        type=Path,
+        default=Path("data/processed/gangnam_2025_11_station_hour.parquet"),
+    )
+    latent_parser.add_argument(
+        "--coordinate-file",
+        type=Path,
+        default=Path("data/sample/gangnam_station_coordinates_2026_08_20.csv"),
+    )
+    latent_parser.add_argument("--training-start", default="2025-11-03")
+    latent_parser.add_argument("--training-end", default="2025-11-22")
+    latent_parser.add_argument("--evaluation-start", default="2025-11-24")
+    latent_parser.add_argument("--evaluation-end", default="2025-11-29")
+    latent_parser.add_argument(
+        "--policy-runs-output",
+        type=Path,
+        default=Path("reports/data/gangnam_2025_11_latent_policy_runs.csv"),
+    )
+    latent_parser.add_argument(
+        "--paired-runs-output",
+        type=Path,
+        default=Path("reports/data/gangnam_2025_11_latent_paired_runs.csv"),
+    )
+    latent_parser.add_argument(
+        "--summary-output",
+        type=Path,
+        default=Path("reports/data/gangnam_2025_11_latent_summary.csv"),
+    )
+    latent_parser.add_argument(
+        "--figure-output",
+        type=Path,
+        default=Path("reports/figures/gangnam_2025_11_latent_sensitivity.png"),
+    )
+    latent_parser.add_argument(
+        "--json-output",
+        type=Path,
+        default=Path("reports/gangnam_2025_11_latent_sensitivity.json"),
+    )
+    latent_parser.add_argument(
+        "--markdown-output",
+        type=Path,
+        default=Path("reports/gangnam_2025_11_latent_sensitivity.md"),
+    )
     return parser
 
 
@@ -983,6 +1040,34 @@ def main(argv: Sequence[str] | None = None) -> int:
                 f"{comparison['total_distance_km_change']:+.1f}km/"
                 f"{comparison['fleet_utilization_rate']:.1%}"
             )
+        print(f"Report: {args.markdown_output}")
+        return 0
+    if args.command == "run-latent-demand-sensitivity":
+        try:
+            experiment = build_latent_demand_sensitivity(
+                trips_path=args.trips_file,
+                station_hour_path=args.station_hour_file,
+                coordinate_path=args.coordinate_file,
+                training_start=datetime.fromisoformat(args.training_start),
+                training_end=datetime.fromisoformat(args.training_end),
+                evaluation_start=datetime.fromisoformat(args.evaluation_start),
+                evaluation_end=datetime.fromisoformat(args.evaluation_end),
+                policy_runs_csv_path=args.policy_runs_output,
+                paired_runs_csv_path=args.paired_runs_output,
+                summary_csv_path=args.summary_output,
+                figure_path=args.figure_output,
+                json_path=args.json_output,
+                markdown_path=args.markdown_output,
+            )
+        except (LatentSensitivityError, ValueError, OSError) as exc:
+            print(f"Latent demand sensitivity failed: {exc}")
+            return 1
+
+        print(f"Latent demand sensitivity: {experiment.interpretation_status}")
+        print(
+            f"Runs: {len(experiment.seeds)} seeds x "
+            f"{len(experiment.scenarios)} scenarios x 2 policies"
+        )
         print(f"Report: {args.markdown_output}")
         return 0
     if args.command == "run-simulation":
